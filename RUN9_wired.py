@@ -11,8 +11,8 @@ import sqlite3, hashlib, threading, time, random, datetime
 import subprocess, os, re, queue
 from pathlib import Path
 
-# ── Project root — adjust if your layout differs ────────────
-HYBRID_ROOT  = Path.home() / "hybrid_vas"
+# ── Project root — resolved relative to this script ─────────
+HYBRID_ROOT  = Path(__file__).resolve().parent
 SCRIPTS_DIR  = HYBRID_ROOT / "automated_tools" / "malware_scan" / "scripts"
 MANUAL_DIR   = HYBRID_ROOT / "manual_tools"
 DB_PATH      = HYBRID_ROOT / "database" / "hybrid_vas.db"
@@ -151,8 +151,9 @@ def init_db():
         timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS usb_scans(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        usb_name TEXT, scan_mode TEXT,
-        result TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        usb_name TEXT, result TEXT,
+        files_scanned INTEGER DEFAULT 0,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
     for u, p, r in [
         ("admin",    "admin123",   "admin"),
         ("analyst1", "analyst123", "analyst"),
@@ -184,7 +185,8 @@ def db_audit(u, a):
             "INSERT INTO audit(username,action,ts) VALUES(?,?,?)",
             (u, a, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         c.commit(); c.close()
-    except: pass
+    except Exception as e:
+        print(f"[AUDIT ERROR] user={u} action={a}: {e}")
 
 def db_users():
     c = sqlite3.connect(DB); cur = c.cursor()
@@ -226,22 +228,33 @@ def db_save_result(tid, target, out_text, threat, user):
         cur  = conn.cursor()
         if tid in ("malware", "ai"):
             fname = os.path.basename(target or "unknown")
+            # Extract malware family from scan output if present
+            malware_family = "Unknown"
+            for line in (out_text or []):
+                ll = line.lower()
+                if "trojan" in ll:   malware_family = "Trojan";   break
+                if "ransomware" in ll: malware_family = "Ransomware"; break
+                if "worm" in ll:     malware_family = "Worm";     break
+                if "spyware" in ll:  malware_family = "Spyware";  break
+                if "adware" in ll:   malware_family = "Adware";   break
+                if "rootkit" in ll:  malware_family = "Rootkit";  break
             cur.execute(
                 "INSERT INTO malware_scan_logs"
-                "(file_name,file_path,result,confidence,scan_method,operator,timestamp)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "(file_name,file_path,result,malware_family,confidence,scan_method,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?,?)",
                 (fname, target or "N/A",
                  verdict if not summary else summary[:80],
+                 malware_family,
                  0.947 if tid == "ai" else 0.0,
                  "AI/ML" if tid == "ai" else "static", op, ts))
         elif tid == "backdoor":
             cur.execute(
                 "INSERT INTO backdoor_scans"
-                "(scan_type,verdict,risk_score,operator,timestamp)"
-                " VALUES(?,?,?,?,?)",
+                "(scan_type,verdict,risk_score,target,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?)",
                 ("full-system",
                  verdict if not summary else summary[:80],
-                 risk, op, ts))
+                 risk, target or "localhost", op, ts))
         elif tid == "vuln":
             cur.execute(
                 "INSERT INTO vuln_scans(target,operator,timestamp) VALUES(?,?,?)",
@@ -732,15 +745,6 @@ class ToolCard(tk.Frame):
             self.bind("<Button-1>", lambda e: self._run())
             for child in self.winfo_children():
                 child.bind("<Button-1>", lambda e: self._run())
-            # Manual tools — click to run
-            self.bind("<Enter>", lambda e:
-                self.configure(highlightbackground=tool["accent"]))
-            self.bind("<Leave>", lambda e:
-                self.configure(highlightbackground=(
-                    tool["accent"] if self._done else BORDER)))
-            self.bind("<Button-1>", lambda e: self._run())
-            for child in self.winfo_children():
-                child.bind("<Button-1>", lambda e: self._run())
 
     def _build(self):
         acc = self.tool["accent"]
@@ -931,8 +935,9 @@ class ToolCard(tk.Frame):
                 out_text.append(line)
                 lo = line.lower()
                 if any(w in lo for w in [
-                    "malicious", "threat detected", "backdoor",
-                    "reverse shell", "critical", "verdict"
+                    "malicious", "threat detected", "backdoor detected",
+                    "reverse shell", "critical vulnerability",
+                    "high severity",
                 ]):
                     threat = True
 
@@ -1829,7 +1834,7 @@ class ResultsViewer(tk.Frame):
             ("USB Scanner",
              "SELECT id, usb_name, result, '0', timestamp FROM usb_scans ORDER BY id DESC LIMIT 20"),
             ("Vulnerability Scanner",
-             "SELECT id, cve_id, description, cvss_score, timestamp FROM vuln_findings ORDER BY id DESC LIMIT 20"),
+             "SELECT id, COALESCE(cve_id, 'N/A'), description, COALESCE(cvss_score, 0.0), timestamp FROM vuln_findings ORDER BY id DESC LIMIT 20"),
         ]
 
         for tool_name, query in queries:
