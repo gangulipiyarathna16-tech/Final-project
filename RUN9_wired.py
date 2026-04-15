@@ -104,6 +104,7 @@ DB = str(DB_PATH)
 def _h(p): return hashlib.sha256(p.encode()).hexdigest()
 
 def init_db():
+    os.makedirs(os.path.dirname(DB), exist_ok=True)
     c = sqlite3.connect(DB); cur = c.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS users(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,8 +284,10 @@ def db_save_result(tid, target, out_text, threat, user):
                  ts))
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        import traceback
+        print(f"[db_save_result ERROR] tid={tid} target={target}: {e}")
+        traceback.print_exc()
 
 # ═══════════════════════════════════════════════════════
 #  TOOL DEFINITIONS
@@ -1825,6 +1828,8 @@ class ResultsViewer(tk.Frame):
              "SELECT id, target, result, risk_score, timestamp FROM port_scans ORDER BY id DESC LIMIT 20"),
             ("USB Scanner",
              "SELECT id, usb_name, result, '0', timestamp FROM usb_scans ORDER BY id DESC LIMIT 20"),
+            ("Vulnerability Scanner",
+             "SELECT id, cve_id, description, cvss_score, timestamp FROM vuln_findings ORDER BY id DESC LIMIT 20"),
         ]
 
         for tool_name, query in queries:
@@ -1852,6 +1857,11 @@ class ResultsViewer(tk.Frame):
                     conn.execute(f"DELETE FROM {table}")
                 except Exception:
                     pass
+            # Also clear the parent vuln_scans table (not in TABS directly)
+            try:
+                conn.execute("DELETE FROM vuln_scans")
+            except Exception:
+                pass
             conn.commit()
             conn.close()
             self._load()
