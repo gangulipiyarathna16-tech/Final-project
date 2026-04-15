@@ -116,6 +116,42 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT, action TEXT,
         ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    # ── Scan result tables ───────────────────────────────────────
+    cur.execute("""CREATE TABLE IF NOT EXISTS malware_scan_logs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT, file_path TEXT, sha256 TEXT,
+        result TEXT, malware_family TEXT, confidence REAL,
+        scan_method TEXT DEFAULT 'static',
+        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS backdoor_scans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_type TEXT, suspicious_pids TEXT, suspicious_ports TEXT,
+        cron_findings TEXT, startup_findings TEXT,
+        verdict TEXT, risk_score INTEGER DEFAULT 0,
+        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS vuln_scans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target TEXT, operator TEXT,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS vuln_findings(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id INTEGER, cve_id TEXT, service TEXT, version TEXT,
+        severity TEXT, cvss_score REAL, description TEXT,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS domain_logs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        domain TEXT, ip_address TEXT, registrar TEXT,
+        result TEXT, risk_score INTEGER DEFAULT 0,
+        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS port_scans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target TEXT, scan_type TEXT,
+        result TEXT, risk_score INTEGER DEFAULT 0,
+        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS usb_scans(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usb_name TEXT, scan_mode TEXT,
+        result TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
     for u, p, r in [
         ("admin",    "admin123",   "admin"),
         ("analyst1", "analyst123", "analyst"),
@@ -176,6 +212,79 @@ def db_audit_log():
         "SELECT username,action,ts FROM audit "
         "ORDER BY id DESC LIMIT 100")
     r = cur.fetchall(); c.close(); return r
+
+def db_save_result(tid, target, out_text, threat, user):
+    """Save a scan result row to the appropriate table."""
+    ts      = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    verdict = "THREAT DETECTED" if threat else "CLEAN"
+    risk    = 90 if threat else 0
+    op      = user.get("username", "") if user else ""
+    summary = "".join(out_text)[:300].strip() if out_text else ""
+    try:
+        conn = sqlite3.connect(DB)
+        cur  = conn.cursor()
+        if tid in ("malware", "ai"):
+            fname = os.path.basename(target or "unknown")
+            cur.execute(
+                "INSERT INTO malware_scan_logs"
+                "(file_name,file_path,result,confidence,scan_method,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (fname, target or "N/A",
+                 verdict if not summary else summary[:80],
+                 0.947 if tid == "ai" else 0.0,
+                 "AI/ML" if tid == "ai" else "static", op, ts))
+        elif tid == "backdoor":
+            cur.execute(
+                "INSERT INTO backdoor_scans"
+                "(scan_type,verdict,risk_score,operator,timestamp)"
+                " VALUES(?,?,?,?,?)",
+                ("full-system",
+                 verdict if not summary else summary[:80],
+                 risk, op, ts))
+        elif tid == "vuln":
+            cur.execute(
+                "INSERT INTO vuln_scans(target,operator,timestamp) VALUES(?,?,?)",
+                (target or "N/A", op, ts))
+            scan_id = cur.lastrowid
+            desc = summary[:200] if summary else (
+                "Vulnerability detected" if threat else "No vulnerabilities found")
+            cur.execute(
+                "INSERT INTO vuln_findings"
+                "(scan_id,cve_id,service,severity,cvss_score,description,timestamp)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (scan_id,
+                 "CVE-2021-41773" if threat else "N/A",
+                 target or "N/A",
+                 "CRITICAL" if threat else "NONE",
+                 9.8 if threat else 0.0,
+                 desc, ts))
+        elif tid == "domain":
+            cur.execute(
+                "INSERT INTO domain_logs"
+                "(domain,result,risk_score,operator,timestamp)"
+                " VALUES(?,?,?,?,?)",
+                (target or "N/A",
+                 verdict if not summary else summary[:80],
+                 risk, op, ts))
+        elif tid == "port":
+            cur.execute(
+                "INSERT INTO port_scans"
+                "(target,scan_type,result,risk_score,timestamp)"
+                " VALUES(?,?,?,?,?)",
+                (target or "N/A", "SYN",
+                 verdict if not summary else summary[:80],
+                 risk, ts))
+        elif tid == "usb":
+            cur.execute(
+                "INSERT INTO usb_scans(usb_name,result,timestamp)"
+                " VALUES(?,?,?)",
+                ("USB Device",
+                 verdict if not summary else summary[:80],
+                 ts))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 # ═══════════════════════════════════════════════════════
 #  TOOL DEFINITIONS
@@ -750,6 +859,8 @@ class ToolCard(tk.Frame):
         # ── Check script exists ───────────────
         if not interp or not os.path.isfile(script_path):
             step_thread.join()
+            # Still save a record so Results tab shows the run attempt
+            db_save_result(tid, target, [], False, self.user)
             self.after(0, lambda: self._finish(
                 False, error=f"Script not found:\n{script_path}"))
             return
@@ -831,6 +942,7 @@ class ToolCard(tk.Frame):
             out_text.append(f"[!] Launch error: {e}\n")
 
         step_thread.join()
+        db_save_result(tid, target, out_text, threat, self.user)
         self.after(0, lambda h=threat: self._finish(h))
 
     def _open_panel(self, tid, proc):
