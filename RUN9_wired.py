@@ -8,8 +8,12 @@ Install: sudo apt install python3-tk -y
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import sqlite3, hashlib, threading, time, random, datetime
-import subprocess, os, re, queue
+import subprocess, os, re, queue, sys
 from pathlib import Path
+
+# ── OS detection ─────────────────────────────────────────────
+IS_WINDOWS = sys.platform.startswith("win")
+IS_LINUX   = sys.platform.startswith("linux")
 
 # ── Project root — resolved relative to this script ─────────
 HYBRID_ROOT  = Path(__file__).resolve().parent
@@ -30,6 +34,53 @@ SCRIPT_MAP = {
     "vuln"      : ("python3",     str(HYBRID_ROOT / "automated_tools" / "vuln_scanner.py")),
     "cuckoo"    : (None,          None),  # Not installed yet
 }
+
+# ── WSL helpers (Windows only) ───────────────────────────────
+def _wsl_available():
+    """Return True if WSL is installed and reachable on this Windows machine."""
+    try:
+        r = subprocess.run(["wsl", "echo", "ok"],
+                           capture_output=True, timeout=6)
+        return r.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+def _win_to_wsl_path(win_path: str) -> str:
+    """Convert an absolute Windows path to its /mnt/<drive>/... WSL equivalent."""
+    p = Path(win_path)
+    drive = p.drive.rstrip(":").lower()          # "C:" → "c"
+    rest  = p.as_posix().replace(p.drive, "", 1).lstrip("/")
+    return f"/mnt/{drive}/{rest}"
+
+_WSL_OK: bool | None = None   # cached probe result
+
+def _build_cmd(interp: str, script_path: str) -> list[str] | None:
+    """
+    Return the subprocess command list for the given interpreter + script,
+    adjusted for the current OS.
+
+    Linux  → run directly: ["bash", script] or [sys.executable, script]
+    Windows:
+      bash scripts → ["wsl", "bash", wsl_path]  (only if WSL is configured)
+      python tools → [sys.executable, script]   (native Python, no WSL needed)
+
+    Returns None when the tool cannot run on this OS.
+    """
+    global _WSL_OK
+    if interp == "python3":
+        return [sys.executable, script_path]
+
+    if interp == "bash":
+        if IS_LINUX:
+            return ["bash", script_path]       # run directly — no WSL on Linux
+        # Windows — try WSL
+        if _WSL_OK is None:
+            _WSL_OK = _wsl_available()
+        if _WSL_OK:
+            return ["wsl", "bash", _win_to_wsl_path(script_path)]
+        return None   # WSL not configured
+
+    return [interp, script_path]
 
 # Tools that need a target input before running
 NEEDS_TARGET = {
@@ -117,43 +168,143 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT, action TEXT,
         ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    # ── Scan result tables ───────────────────────────────────────
+
+    # ── Master session table — one row per scan run ──────────────
+    cur.execute("""CREATE TABLE IF NOT EXISTS scan_sessions(
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        tool_id     TEXT NOT NULL,
+        target      TEXT,
+        operator    TEXT NOT NULL DEFAULT '',
+        threat      INTEGER DEFAULT 0,
+        risk_score  INTEGER DEFAULT 0,
+        started_at  TEXT NOT NULL,
+        finished_at TEXT,
+        duration_ms INTEGER,
+        raw_output  TEXT)""")
+
+    # ── Malware / AI scanner ─────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS malware_scan_logs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_name TEXT, file_path TEXT, sha256 TEXT,
-        result TEXT, malware_family TEXT, confidence REAL,
-        scan_method TEXT DEFAULT 'static',
-        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id     INTEGER REFERENCES scan_sessions(id),
+        file_name      TEXT,
+        file_path      TEXT,
+        sha256         TEXT,
+        result         TEXT,
+        malware_family TEXT,
+        confidence     REAL,
+        scan_method    TEXT DEFAULT 'static',
+        operator       TEXT,
+        timestamp      TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # ── Backdoor scanner ─────────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS backdoor_scans(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        scan_type TEXT, suspicious_pids TEXT, suspicious_ports TEXT,
-        cron_findings TEXT, startup_findings TEXT,
-        verdict TEXT, risk_score INTEGER DEFAULT 0,
-        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id        INTEGER REFERENCES scan_sessions(id),
+        scan_type         TEXT,
+        suspicious_pids   TEXT,
+        suspicious_ports  TEXT,
+        cron_findings     TEXT,
+        startup_findings  TEXT,
+        verdict           TEXT,
+        risk_score        INTEGER DEFAULT 0,
+        operator          TEXT,
+        timestamp         TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # Migrate existing backdoor_scans table — add columns added after initial release
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(backdoor_scans)")}
+    for col, defn in [
+        ("suspicious_pids",  "TEXT"),
+        ("suspicious_ports", "TEXT"),
+        ("cron_findings",    "TEXT"),
+        ("startup_findings", "TEXT"),
+    ]:
+        if col not in existing_cols:
+            cur.execute(f"ALTER TABLE backdoor_scans ADD COLUMN {col} {defn}")
+
+    # structured per-finding rows replacing the 4 NULL blob columns
+    cur.execute("""CREATE TABLE IF NOT EXISTS backdoor_findings(
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id  INTEGER REFERENCES backdoor_scans(id),
+        category TEXT,
+        value    TEXT,
+        detail   TEXT)""")
+
+    # ── Vulnerability scanner ────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS vuln_scans(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        target TEXT, operator TEXT,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  INTEGER REFERENCES scan_sessions(id),
+        target      TEXT,
+        operator    TEXT,
+        timestamp   TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS vuln_findings(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        scan_id INTEGER, cve_id TEXT, service TEXT, version TEXT,
-        severity TEXT, cvss_score REAL, description TEXT,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id     INTEGER REFERENCES vuln_scans(id),
+        cve_id      TEXT,
+        service     TEXT,
+        version     TEXT,
+        port        INTEGER,
+        severity    TEXT,
+        cvss_score  REAL,
+        description TEXT,
+        timestamp   TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    # Migrate: add port column to existing vuln_findings tables
+    _vf_cols = {row[1] for row in cur.execute("PRAGMA table_info(vuln_findings)")}
+    if "port" not in _vf_cols:
+        cur.execute("ALTER TABLE vuln_findings ADD COLUMN port INTEGER")
+
+    # ── Domain scanner ───────────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS domain_logs(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        domain TEXT, ip_address TEXT, registrar TEXT,
-        result TEXT, risk_score INTEGER DEFAULT 0,
-        operator TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  INTEGER REFERENCES scan_sessions(id),
+        domain      TEXT,
+        ip_address  TEXT,
+        registrar   TEXT,
+        result      TEXT,
+        risk_score  INTEGER DEFAULT 0,
+        operator    TEXT,
+        timestamp   TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    # ── Port scanner ─────────────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS port_scans(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        target TEXT, scan_type TEXT,
-        result TEXT, risk_score INTEGER DEFAULT 0,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  INTEGER REFERENCES scan_sessions(id),
+        target      TEXT,
+        scan_type   TEXT,
+        result      TEXT,
+        risk_score  INTEGER DEFAULT 0,
+        operator    TEXT,
+        timestamp   TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS port_findings(
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id   INTEGER REFERENCES port_scans(id),
+        port      INTEGER,
+        protocol  TEXT,
+        state     TEXT,
+        service   TEXT,
+        version   TEXT)""")
+
+    # ── USB scanner ──────────────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS usb_scans(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        usb_name TEXT, result TEXT,
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    INTEGER REFERENCES scan_sessions(id),
+        usb_name      TEXT,
+        device_path   TEXT,
         files_scanned INTEGER DEFAULT 0,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        threats_found INTEGER DEFAULT 0,
+        result        TEXT,
+        operator      TEXT,
+        timestamp     TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS usb_file_results(
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id        INTEGER REFERENCES usb_scans(id),
+        file_name      TEXT,
+        file_path      TEXT,
+        sha256         TEXT,
+        result         TEXT,
+        malware_family TEXT)""")
     for u, p, r in [
         ("admin",    "admin123",   "admin"),
         ("analyst1", "analyst123", "analyst"),
@@ -216,91 +367,417 @@ def db_audit_log():
         "ORDER BY id DESC LIMIT 100")
     r = cur.fetchall(); c.close(); return r
 
-def db_save_result(tid, target, out_text, threat, user):
-    """Save a scan result row to the appropriate table."""
-    ts      = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    verdict = "THREAT DETECTED" if threat else "CLEAN"
-    risk    = 90 if threat else 0
-    op      = user.get("username", "") if user else ""
-    summary = "".join(out_text)[:300].strip() if out_text else ""
+def _parse_sha256(target):
+    """Compute SHA-256 of the target file; return hex string or None."""
     try:
-        conn = sqlite3.connect(DB)
+        if target and os.path.isfile(target):
+            h = hashlib.sha256()
+            with open(target, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+    except Exception:
+        pass
+    return None
+
+def _parse_confidence(lines):
+    """Extract confidence/probability float from scanner output lines."""
+    for line in lines:
+        m = re.search(r'confidence[:\s]+([0-9]+\.?[0-9]*)\s*%?', line, re.I)
+        if m:
+            v = float(m.group(1))
+            return v / 100.0 if v > 1.0 else v
+        m = re.search(r'probability[:\s]+([0-9]+\.?[0-9]*)\s*%?', line, re.I)
+        if m:
+            v = float(m.group(1))
+            return v / 100.0 if v > 1.0 else v
+    return None
+
+def _parse_malware_family(lines):
+    """Extract malware family from scanner output lines."""
+    families = ["ransomware", "trojan", "rootkit", "worm",
+                "spyware", "adware", "backdoor", "keylogger", "botnet"]
+    for line in lines:
+        ll = line.lower()
+        for f in families:
+            if f in ll:
+                return f.capitalize()
+    return "Unknown"
+
+def _parse_backdoor_findings(lines):
+    """Return list of (category, value, detail) tuples from backdoor output."""
+    findings = []
+    cat = None
+    for line in lines:
+        s = line.strip()
+        ll = s.lower()
+        if not s:
+            continue
+        if any(k in ll for k in ["suspicious process", "suspicious pid", "malicious process"]):
+            cat = "pid"
+        elif any(k in ll for k in ["suspicious port", "open port", "listening port"]):
+            cat = "port"
+        elif any(k in ll for k in ["cron", "scheduled task"]):
+            cat = "cron"
+        elif any(k in ll for k in ["startup", "autorun", "persistence", "boot"]):
+            cat = "startup"
+
+        pid_m = re.search(r'\bpid[:\s]+(\d+)', s, re.I)
+        if pid_m and cat == "pid":
+            findings.append(("pid", pid_m.group(1), s))
+            continue
+        port_m = re.search(r'\b(\d{2,5})/?(tcp|udp)?\b', s, re.I)
+        if port_m and cat == "port":
+            findings.append(("port", port_m.group(1), s))
+            continue
+        if cat in ("cron", "startup") and (
+                re.search(r'[/\\]', s) or re.search(r'\w{4,}', s)):
+            findings.append((cat, s[:120], s))
+    return findings
+
+def _parse_cve_findings(lines, target, ts):
+    """Return list of vuln_findings dicts parsed from scanner output."""
+    findings = []
+    cve_pat  = re.compile(r'CVE-\d{4}-\d{4,7}', re.I)
+    cvss_pat = re.compile(r'cvss[:\s]+([0-9]+\.?[0-9]*)', re.I)
+    ver_pat  = re.compile(r'version[:\s]+([\w./\-]+)', re.I)
+    sev_pat  = re.compile(r'\b(critical|high|medium|low|info)\b', re.I)
+
+    current = {}
+    for line in lines:
+        s = line.strip()
+        cve_m = cve_pat.search(s)
+        if cve_m:
+            if current.get("cve_id"):
+                findings.append(current)
+            current = {
+                "cve_id":      cve_m.group(0).upper(),
+                "service":     target or "N/A",
+                "version":     None,
+                "severity":    "UNKNOWN",
+                "cvss_score":  0.0,
+                "description": s[:200],
+                "timestamp":   ts,
+            }
+        if current:
+            cvss_m = cvss_pat.search(s)
+            if cvss_m:
+                current["cvss_score"] = float(cvss_m.group(1))
+            ver_m = ver_pat.search(s)
+            if ver_m:
+                current["version"] = ver_m.group(1)[:40]
+            sev_m = sev_pat.search(s)
+            if sev_m:
+                current["severity"] = sev_m.group(1).upper()
+
+    if current.get("cve_id"):
+        findings.append(current)
+    return findings
+
+def _parse_domain_info(lines):
+    """Extract ip_address and registrar from domain scanner output."""
+    ip_addr   = None
+    registrar = None
+    ip_pat  = re.compile(r'\b(\d{1,3}(?:\.\d{1,3}){3})\b')
+    reg_pat = re.compile(r'registrar[:\s]+(.+)', re.I)
+    for line in lines:
+        if not ip_addr:
+            m = ip_pat.search(line)
+            if m:
+                ip_addr = m.group(1)
+        if not registrar:
+            m = reg_pat.search(line)
+            if m:
+                registrar = m.group(1).strip()[:100]
+    return ip_addr, registrar
+
+def _parse_port_findings(lines):
+    """Return list of (port, protocol, state, service, version) from port scanner output."""
+    findings = []
+    pat = re.compile(
+        r'(\d{1,5})/(tcp|udp)\s+(open|filtered|closed)\s*(\S*)\s*(.*)', re.I)
+    for line in lines:
+        m = pat.search(line)
+        if m:
+            findings.append((
+                int(m.group(1)),
+                m.group(2).upper(),
+                m.group(3).lower(),
+                m.group(4) or None,
+                m.group(5).strip()[:100] or None,
+            ))
+    return findings
+
+def _parse_scan_type(lines):
+    """Detect actual port scan type from output."""
+    for line in lines:
+        ll = line.lower()
+        if "udp" in ll and "scan" in ll:   return "UDP"
+        if "syn" in ll and "scan" in ll:   return "SYN"
+        if "connect" in ll and "scan" in ll: return "CONNECT"
+        if "full" in ll and "scan" in ll:  return "FULL"
+    return "SYN"
+
+def _parse_usb_info(lines):
+    """Extract USB device name, device path, files_scanned, threats_found
+    and per-file results from USB scanner output."""
+    usb_name      = None
+    device_path   = None
+    files_scanned = 0
+    threats_found = 0
+    file_results  = []
+
+    dev_pat   = re.compile(r'device[:\s]+(.+)', re.I)
+    path_pat  = re.compile(r'(mount|path|drive)[:\s]+([/\\\w: ]+)', re.I)
+    count_pat = re.compile(r'(\d+)\s+files?\s+scanned', re.I)
+    threat_pat= re.compile(r'(\d+)\s+(threat|malicious|infected)', re.I)
+    file_pat  = re.compile(r'(scanning|checked|file)[:\s]+(.+\.\w+)', re.I)
+    clean_pat = re.compile(r'\b(clean|ok|safe|no threat)\b', re.I)
+    bad_pat   = re.compile(r'\b(infected|malicious|threat|detected)\b', re.I)
+
+    for line in lines:
+        s = line.strip()
+        if not usb_name:
+            m = dev_pat.search(s)
+            if m: usb_name = m.group(1).strip()[:80]
+        if not device_path:
+            m = path_pat.search(s)
+            if m: device_path = m.group(2).strip()[:120]
+        m = count_pat.search(s)
+        if m: files_scanned = int(m.group(1))
+        m = threat_pat.search(s)
+        if m: threats_found = int(m.group(1))
+        m = file_pat.search(s)
+        if m:
+            fname = m.group(2).strip()
+            result = "THREAT DETECTED" if bad_pat.search(s) else "CLEAN"
+            file_results.append((os.path.basename(fname), fname, result))
+
+    return usb_name, device_path, files_scanned, threats_found, file_results
+
+def _parse_real_verdict(lines):
+    """Extract the actual verdict line printed by the scanner, or return None."""
+    for line in lines:
+        s = line.strip()
+        ll = s.lower()
+        # Backdoor: "  VERDICT : BACKDOOR DETECTED" / "CLEAN — NO BACKDOOR FOUND"
+        # Vuln:     "  VERDICT : 2 CRITICAL/HIGH CVEs — patch immediately"
+        # Malware:  "VERDICT:  THREAT DETECTED"
+        if "verdict" in ll and ":" in s:
+            # Strip ANSI codes, leading symbols, whitespace
+            clean = re.sub(r'\x1b\[[0-9;]*m', '', s)
+            clean = re.sub(r'^[=\s\[\]\|✔!*>-]+', '', clean).strip()
+            # Remove "VERDICT :" prefix (case-insensitive)
+            clean = re.sub(r'^verdict\s*:?\s*', '', clean, flags=re.I).strip()
+            if clean:
+                return clean[:120]
+    return None
+
+def db_save_result(tid, target, out_text, threat, user,
+                   started_at=None, verdict_override=None):
+    """Save a scan result to the appropriate tables with full structured detail."""
+    finished_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts          = finished_at
+    op          = user.get("username", "") if user else ""
+    lines       = list(out_text or [])
+    raw         = "".join(lines)
+
+    if verdict_override:
+        verdict = verdict_override
+        vl      = verdict.lower()
+        threat  = "suspicious" in vl or "threat" in vl or "malicious" in vl
+    else:
+        # Use the real verdict line from output; fall back to THREAT DETECTED / CLEAN
+        parsed_verdict = _parse_real_verdict(lines)
+        if parsed_verdict:
+            verdict = parsed_verdict
+            vl      = verdict.lower()
+            threat  = any(w in vl for w in [
+                "threat", "malicious", "backdoor", "detected",
+                "critical", "suspicious", "reverse shell",
+            ])
+        else:
+            verdict = "THREAT DETECTED" if threat else "CLEAN"
+
+    risk = 90 if threat else (30 if "partial" in verdict.lower() else 0)
+
+    if started_at:
+        try:
+            t0 = datetime.datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
+            t1 = datetime.datetime.strptime(finished_at, "%Y-%m-%d %H:%M:%S")
+            duration_ms = int((t1 - t0).total_seconds() * 1000)
+        except Exception:
+            duration_ms = None
+    else:
+        duration_ms = None
+
+    try:
+        conn = sqlite3.connect(DB, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
         cur  = conn.cursor()
+
+        # ── Master session row ────────────────────────────────────
+        cur.execute(
+            "INSERT INTO scan_sessions"
+            "(tool_id,target,operator,threat,risk_score,started_at,finished_at,duration_ms,raw_output)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (tid, target or "N/A", op, int(threat), risk,
+             started_at or ts, finished_at, duration_ms, raw or None))
+        session_id = cur.lastrowid
+
+        # ── Malware / AI ──────────────────────────────────────────
         if tid in ("malware", "ai"):
-            fname = os.path.basename(target or "unknown")
-            # Extract malware family from scan output if present
-            malware_family = "Unknown"
-            for line in (out_text or []):
-                ll = line.lower()
-                if "trojan" in ll:   malware_family = "Trojan";   break
-                if "ransomware" in ll: malware_family = "Ransomware"; break
-                if "worm" in ll:     malware_family = "Worm";     break
-                if "spyware" in ll:  malware_family = "Spyware";  break
-                if "adware" in ll:   malware_family = "Adware";   break
-                if "rootkit" in ll:  malware_family = "Rootkit";  break
+            sha256         = _parse_sha256(target)
+            confidence     = _parse_confidence(lines)
+            malware_family = _parse_malware_family(lines)
+            if confidence is None:
+                confidence = 0.947 if tid == "ai" else 0.0
             cur.execute(
                 "INSERT INTO malware_scan_logs"
-                "(file_name,file_path,result,malware_family,confidence,scan_method,operator,timestamp)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (fname, target or "N/A",
-                 verdict if not summary else summary[:80],
+                "(session_id,file_name,file_path,sha256,result,"
+                " malware_family,confidence,scan_method,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (session_id,
+                 os.path.basename(target or "unknown"),
+                 target or "N/A",
+                 sha256,
+                 verdict,
                  malware_family,
-                 0.947 if tid == "ai" else 0.0,
-                 "AI/ML" if tid == "ai" else "static", op, ts))
+                 confidence,
+                 "AI/ML" if tid == "ai" else "static",
+                 op, ts))
+
+        # ── Backdoor ──────────────────────────────────────────────
         elif tid == "backdoor":
+            findings = _parse_backdoor_findings(lines)
+
+            def _field_label(cat):
+                vals = [v for c, v, _ in findings if c == cat]
+                if vals:
+                    return ", ".join(vals)
+                # Determine label from scanner output for this category
+                section_map = {
+                    "pid":     ("processes",   "process"),
+                    "port":    ("connections", "connection"),
+                    "cron":    ("cron",        "task"),
+                    "startup": ("startup",     "startup"),
+                }
+                sect, _ = section_map.get(cat, ("", ""))
+                raw_lower = raw.lower()
+                if f"not supported" in raw_lower and sect in raw_lower:
+                    return "Not Supported"
+                if f"scan failed" in raw_lower and sect in raw_lower:
+                    return "Scan Failed"
+                return "No Findings"
+
+            pids    = _field_label("pid")
+            ports   = _field_label("port")
+            cron    = _field_label("cron")
+            startup = _field_label("startup")
             cur.execute(
                 "INSERT INTO backdoor_scans"
-                "(scan_type,verdict,risk_score,target,operator,timestamp)"
-                " VALUES(?,?,?,?,?,?)",
-                ("full-system",
-                 verdict if not summary else summary[:80],
-                 risk, target or "localhost", op, ts))
+                "(session_id,scan_type,suspicious_pids,suspicious_ports,"
+                " cron_findings,startup_findings,verdict,risk_score,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (session_id, "full-system", pids, ports,
+                 cron, startup, verdict, risk, op, ts))
+            scan_id = cur.lastrowid
+            for category, value, detail in findings:
+                cur.execute(
+                    "INSERT INTO backdoor_findings(scan_id,category,value,detail)"
+                    " VALUES(?,?,?,?)",
+                    (scan_id, category, value, detail))
+
+        # ── Vulnerability ─────────────────────────────────────────
         elif tid == "vuln":
             cur.execute(
-                "INSERT INTO vuln_scans(target,operator,timestamp) VALUES(?,?,?)",
-                (target or "N/A", op, ts))
-            scan_id = cur.lastrowid
-            desc = summary[:200] if summary else (
-                "Vulnerability detected" if threat else "No vulnerabilities found")
-            cur.execute(
-                "INSERT INTO vuln_findings"
-                "(scan_id,cve_id,service,severity,cvss_score,description,timestamp)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (scan_id,
-                 "CVE-2021-41773" if threat else "N/A",
-                 target or "N/A",
-                 "CRITICAL" if threat else "NONE",
-                 9.8 if threat else 0.0,
-                 desc, ts))
+                "INSERT INTO vuln_scans(session_id,target,operator,timestamp)"
+                " VALUES(?,?,?,?)",
+                (session_id, target or "N/A", op, ts))
+            scan_id  = cur.lastrowid
+            findings = _parse_cve_findings(lines, target, ts)
+            if findings:
+                for f in findings:
+                    cur.execute(
+                        "INSERT INTO vuln_findings"
+                        "(scan_id,cve_id,service,version,severity,cvss_score,description,timestamp)"
+                        " VALUES(?,?,?,?,?,?,?,?)",
+                        (scan_id, f["cve_id"], f["service"], f["version"],
+                         f["severity"], f["cvss_score"], f["description"], f["timestamp"]))
+            else:
+                cur.execute(
+                    "INSERT INTO vuln_findings"
+                    "(scan_id,cve_id,service,version,severity,cvss_score,description,timestamp)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    (scan_id,
+                     "N/A", target or "N/A", None,
+                     "CRITICAL" if threat else "NONE",
+                     0.0, verdict, ts))
+
+        # ── Domain ────────────────────────────────────────────────
         elif tid == "domain":
+            ip_addr, registrar = _parse_domain_info(lines)
             cur.execute(
                 "INSERT INTO domain_logs"
-                "(domain,result,risk_score,operator,timestamp)"
-                " VALUES(?,?,?,?,?)",
-                (target or "N/A",
-                 verdict if not summary else summary[:80],
-                 risk, op, ts))
+                "(session_id,domain,ip_address,registrar,result,risk_score,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (session_id, target or "N/A",
+                 ip_addr, registrar,
+                 verdict, risk, op, ts))
+
+        # ── Port ──────────────────────────────────────────────────
         elif tid == "port":
+            scan_type = _parse_scan_type(lines)
             cur.execute(
                 "INSERT INTO port_scans"
-                "(target,scan_type,result,risk_score,timestamp)"
-                " VALUES(?,?,?,?,?)",
-                (target or "N/A", "SYN",
-                 verdict if not summary else summary[:80],
-                 risk, ts))
+                "(session_id,target,scan_type,result,risk_score,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (session_id, target or "N/A", scan_type,
+                 verdict, risk, op, ts))
+            scan_id  = cur.lastrowid
+            findings = _parse_port_findings(lines)
+            for port, protocol, state, service, version in findings:
+                cur.execute(
+                    "INSERT INTO port_findings"
+                    "(scan_id,port,protocol,state,service,version)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (scan_id, port, protocol, state, service, version))
+
+        # ── USB ───────────────────────────────────────────────────
         elif tid == "usb":
+            usb_name, device_path, files_scanned, threats_found, file_results = \
+                _parse_usb_info(lines)
             cur.execute(
-                "INSERT INTO usb_scans(usb_name,result,timestamp)"
-                " VALUES(?,?,?)",
-                ("USB Device",
-                 verdict if not summary else summary[:80],
-                 ts))
+                "INSERT INTO usb_scans"
+                "(session_id,usb_name,device_path,files_scanned,threats_found,"
+                " result,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (session_id,
+                 usb_name or "USB Device",
+                 device_path,
+                 files_scanned,
+                 threats_found,
+                 verdict,
+                 op, ts))
+            scan_id = cur.lastrowid
+            for fname, fpath, fresult in file_results:
+                cur.execute(
+                    "INSERT INTO usb_file_results"
+                    "(scan_id,file_name,file_path,sha256,result,malware_family)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (scan_id, fname, fpath,
+                     _parse_sha256(fpath), fresult, None))
+
         conn.commit()
         conn.close()
     except Exception as e:
         import traceback
         print(f"[db_save_result ERROR] tid={tid} target={target}: {e}")
         traceback.print_exc()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════
 #  TOOL DEFINITIONS
@@ -657,17 +1134,17 @@ class OutputPanel(tk.Toplevel):
         tk.Label(self, textvariable=self._status,
                  bg=BG, fg=T3, font=fnt(10)).pack(pady=6)
 
-    def attach_process(self, proc):
+    def set_process(self, proc):
+        """Store process reference so _poll can read its return code."""
         self._proc = proc
-        threading.Thread(target=self._stream, daemon=True).start()
 
-    def _stream(self):
-        """Read stdout line-by-line and push to queue."""
-        for line in iter(self._proc.stdout.readline, ""):
-            self._queue.put(line)
-        self._proc.stdout.close()
-        self._proc.wait()
-        self._queue.put(None)  # sentinel
+    def feed(self, line):
+        """Called from _work thread to push a line into the display queue."""
+        self._queue.put(line)
+
+    def done(self):
+        """Signal that the process has finished — triggers status update."""
+        self._queue.put(None)
 
     def _poll(self):
         """Drain queue into text widget — called from main thread."""
@@ -803,7 +1280,14 @@ class ToolCard(tk.Frame):
         """Called automatically on load for automated tool cards."""
         if self._running:
             return
-        self._start(None)
+        tid = self.tool["id"]
+        # For tools that need a target, use the placeholder as the default
+        # so the script gets proper stdin input instead of blocking on input()
+        target = None
+        if tid in NEEDS_TARGET:
+            _, placeholder = NEEDS_TARGET[tid]
+            target = placeholder
+        self._start(target)
 
     # ── Entry point when card is clicked ─────
     def _run(self):
@@ -848,34 +1332,45 @@ class ToolCard(tk.Frame):
 
     # ── Background worker — runs real script ──
     def _work(self, target):
-        tid      = self.tool["id"]
-        steps    = self.tool["steps"]
-        total    = len(steps)
+        tid        = self.tool["id"]
+        steps      = self.tool["steps"]
+        total      = len(steps)
+        started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         interp, script_path = SCRIPT_MAP.get(tid, (None, None))
 
         # ── Animate progress through steps ────
         def tick_steps():
             for i, step in enumerate(steps[:-1]):
                 time.sleep(0.6)
-                pct = int((i + 1) / total * 80)   # reserve last 20% for real result
+                pct = int((i + 1) / total * 80)
                 self.after(0, lambda p=pct, s=step: self._tick(p, s))
 
         step_thread = threading.Thread(target=tick_steps, daemon=True)
         step_thread.start()
 
-        # ── Check script exists ───────────────
-        if not interp or not os.path.isfile(script_path):
+        def _abort(verdict_str, ui_error=None):
             step_thread.join()
-            # Still save a record so Results tab shows the run attempt
-            db_save_result(tid, target, [], False, self.user)
-            self.after(0, lambda: self._finish(
-                False, error=f"Script not found:\n{script_path}"))
+            db_save_result(tid, target, [], False, self.user, started_at,
+                           verdict_override=verdict_str)
+            self.after(0, lambda v=verdict_str, e=ui_error: self._finish(
+                False, error=e, verdict=v))
+
+        # ── Script existence check ────────────
+        if not interp or not script_path or not os.path.isfile(script_path):
+            _abort("SCAN FAILED", f"Script not found:\n{script_path}")
             return
 
-        # ── Build command ─────────────────────
-        cmd = [interp, script_path]
+        # ── OS-aware command resolution ───────
+        # Linux : bash runs directly — no WSL prefix ever
+        # Windows: bash tools need WSL; python tools use sys.executable
+        cmd = _build_cmd(interp, script_path)
+        if cmd is None:
+            _abort("NOT SUPPORTED",
+                   "WSL is not installed or configured.\n"
+                   "Install WSL to run bash-based tools on Windows.")
+            return
 
-        # Pass target via stdin for Bash tools, or as CLI arg for Python tools
+        # ── Build stdin for interactive scripts ──
         stdin_input = None
         t = target or ""
         if tid == "url" and t:
@@ -883,40 +1378,40 @@ class ToolCard(tk.Frame):
         elif tid == "domain" and t:
             stdin_input = (t + "\n3\n").encode()
         elif tid == "port" and t:
-            stdin_input = (t + "\n1\n").encode()
+            stdin_input = ("1\n" + t + "\n8\n").encode()
         elif tid == "net" and t:
             stdin_input = ("2\n" + t + "\n4\n").encode()
         elif tid == "usb":
             stdin_input = ("1\n3\n").encode()
         elif tid in ("malware", "ai") and t:
-            stdin_input = ("1\n" + t + "\n4\n").encode()
-        elif tid == "backdoor":
-            stdin_input = None
+            # Option 1 = single file, option 2 = folder batch scan
+            menu_opt = "2" if os.path.isdir(t) else "1"
+            stdin_input = (menu_opt + "\n" + t + "\n4\n").encode()
         elif tid == "vuln" and t:
             stdin_input = ("1\n" + t + "\n2\n").encode()
-        elif tid == "cuckoo":
-            stdin_input = None
 
         # ── Launch subprocess ─────────────────
         threat   = False
         out_text = []
+        scan_failed = False
         try:
             env = os.environ.copy()
             env["TERM"] = "dumb"
             env["DEBIAN_FRONTEND"] = "noninteractive"
+            env["PYTHONIOENCODING"] = "utf-8:replace"
 
             proc = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE if stdin_input else None,
+                stdin=subprocess.PIPE if stdin_input else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 bufsize=1,
             )
 
-            # Write stdin FIRST before reading output
-            # so Bash read commands get their input immediately
             if stdin_input:
                 try:
                     proc.stdin.write(stdin_input.decode())
@@ -925,39 +1420,65 @@ class ToolCard(tk.Frame):
                 except Exception:
                     pass
 
-            # Open live output panel
-            # No popup for auto-run tools — results shown in Results Viewer
+            # ── Create live output panel BEFORE reading stdout ────
+            # _work is the sole reader of proc.stdout — no competing thread
+            panel = None
             if not self.auto_run:
-                self.after(0, lambda: self._open_panel(tid, proc))
+                panel_ready = threading.Event()
+                panel_ref   = [None]
+                def _mk_panel():
+                    p = OutputPanel(self.winfo_toplevel(), self.tool["name"])
+                    p.set_process(proc)
+                    panel_ref[0] = p
+                    panel_ready.set()
+                self.after(0, _mk_panel)
+                panel_ready.wait(timeout=3.0)
+                panel = panel_ref[0]
 
-            # Collect output to detect threats
+            # ── Read stdout — single reader ────
             for line in iter(proc.stdout.readline, ""):
                 out_text.append(line)
                 lo = line.lower()
                 if any(w in lo for w in [
-                    "malicious", "threat detected", "backdoor detected",
-                    "reverse shell", "critical vulnerability",
-                    "high severity",
+                    "malicious", "threat detected", "suspicious",
+                    "backdoor detected", "reverse shell",
                 ]):
                     threat = True
+                if panel:
+                    panel.feed(line)
 
             proc.wait(timeout=120)
+            if panel:
+                panel.done()
+
+            # Non-zero exit with no output = something went wrong
+            if proc.returncode != 0 and not out_text:
+                scan_failed = True
 
         except subprocess.TimeoutExpired:
             proc.kill()
             out_text.append("[!] Scan timed out after 120 seconds.\n")
+            scan_failed = True
+        except FileNotFoundError as e:
+            out_text.append(f"[!] Command not found: {e}\n")
+            scan_failed = True
         except Exception as e:
             out_text.append(f"[!] Launch error: {e}\n")
+            scan_failed = True
 
         step_thread.join()
-        db_save_result(tid, target, out_text, threat, self.user)
-        self.after(0, lambda h=threat: self._finish(h))
 
-    def _open_panel(self, tid, proc):
-        """Open the live output panel and attach the process to it."""
-        panel = OutputPanel(self.winfo_toplevel(), self.tool["name"])
-        panel.attach_process(proc)
-        self._panel = panel
+        # Determine final verdict override for failure cases
+        v_override = None
+        if scan_failed and not out_text:
+            v_override = "SCAN FAILED"
+
+        parsed = _parse_real_verdict(out_text)
+        db_save_result(tid, target, out_text, threat, self.user, started_at,
+                       verdict_override=v_override)
+        self.after(0, lambda h=threat, v=parsed or v_override: self._finish(h, verdict=v))
+
+    # _open_panel removed — panel is now created inside _work before reading stdout
 
     # ── UI updates (called via self.after) ────
     def _tick(self, pct, step):
@@ -968,12 +1489,15 @@ class ToolCard(tk.Frame):
         sid = f"tc_{self.tool['id']}.Horizontal.TProgressbar"
         sty.configure(sid, background=AMBER)
 
-    def _finish(self, threat, error=None):
+    def _finish(self, threat, error=None, verdict=None):
         self._running = False
         self._done    = True
         self._pvar.set(100)
         sty = ttk.Style()
         sid = f"tc_{self.tool['id']}.Horizontal.TProgressbar"
+
+        v_lower = (verdict or "").lower()
+        partial = "partial" in v_lower
 
         if error:
             sty.configure(sid, background=AMBER)
@@ -983,12 +1507,17 @@ class ToolCard(tk.Frame):
             messagebox.showerror("Script Error", error)
         elif threat:
             sty.configure(sid, background=RED)
-            self._svar.set("Threat detected!")
+            self._svar.set("SUSPICIOUS — threats found")
             self._slbl.config(fg=RED)
             self.configure(highlightbackground=RED)
+        elif partial:
+            sty.configure(sid, background=AMBER)
+            self._svar.set("PARTIAL — some scans unavailable")
+            self._slbl.config(fg=AMBER)
+            self.configure(highlightbackground=AMBER)
         else:
             sty.configure(sid, background=BLUE)
-            self._svar.set("Scan complete — Clean")
+            self._svar.set("CLEAN — scan complete")
             self._slbl.config(fg=BLUE)
             self.configure(highlightbackground=BLUE)
 
@@ -1639,13 +2168,19 @@ class ResultsViewer(tk.Frame):
     """Bottom panel showing all scan results from the database."""
 
     TABS = [
-        ("All Scans",     None),
-        ("Malware",       "malware_scan_logs"),
-        ("Backdoor",      "backdoor_scans"),
-        ("Vulnerability", "vuln_findings"),
-        ("Domain",        "domain_logs"),
-        ("Port",          "port_scans"),
-        ("USB",           "usb_scans"),
+        ("All Scans",     None,                  None),
+        ("Malware",       "malware_scan_logs",
+         "id,file_name,result,malware_family,confidence,scan_method,operator,timestamp"),
+        ("Backdoor",      "backdoor_scans",
+         "id,scan_type,suspicious_pids,suspicious_ports,cron_findings,startup_findings,verdict,risk_score,operator,timestamp"),
+        ("Vulnerability", "vuln_findings",
+         "id,cve_id,service,version,port,severity,cvss_score,description,timestamp"),
+        ("Domain",        "domain_logs",
+         "id,domain,ip_address,registrar,result,risk_score,operator,timestamp"),
+        ("Port",          "port_scans",
+         "id,target,scan_type,result,risk_score,operator,timestamp"),
+        ("USB",           "usb_scans",
+         "id,usb_name,device_path,files_scanned,threats_found,result,operator,timestamp"),
     ]
 
     def __init__(self, parent, user, **kw):
@@ -1686,7 +2221,7 @@ class ResultsViewer(tk.Frame):
         self._tab_bar = tk.Frame(self, bg=CARD2)
         self._tab_bar.pack(fill="x")
         self._tab_btns = []
-        for i, (label, _) in enumerate(self.TABS):
+        for i, (label, *_) in enumerate(self.TABS):
             btn = tk.Button(
                 self._tab_bar, text=label,
                 bg=BLUE if i == 0 else CARD2,
@@ -1749,11 +2284,27 @@ class ResultsViewer(tk.Frame):
                 font=fnt(10, i == idx))
         self._load()
 
+    # Long text columns that need truncation in individual tab views
+    _LONG_COLS = {"result", "verdict", "description", "raw_output",
+                  "file_path", "cron_findings", "startup_findings",
+                  "suspicious_pids", "suspicious_ports", "geo_info"}
+
+    _TOOL_LABELS = {
+        "malware":  "Malware Scanner",
+        "ai":       "AI Scanner",
+        "backdoor": "Backdoor Scanner",
+        "vuln":     "Vuln Scanner",
+        "domain":   "Domain Checker",
+        "port":     "Port Scanner",
+        "usb":      "USB Scanner",
+        "url":      "URL Scanner",
+        "cuckoo":   "Cuckoo Sandbox",
+    }
+
     def _load(self):
         """Load results from DB into the treeview."""
-        _, table = self.TABS[self._active]
+        _, table, col_spec = self.TABS[self._active]
 
-        # Clear tree
         for row in self._tree.get_children():
             self._tree.delete(row)
 
@@ -1762,52 +2313,73 @@ class ResultsViewer(tk.Frame):
             cur  = conn.cursor()
 
             if table is None:
-                # ALL SCANS — union summary from all tables
                 rows, cols = self._load_all(cur)
             else:
+                # Use explicit column list; fall back gracefully for missing cols
+                cols = [c.strip() for c in col_spec.split(",")]
+                # Filter to only columns that actually exist in the table
                 cur.execute(f"PRAGMA table_info({table})")
-                cols = [r[1] for r in cur.fetchall()]
+                existing = {r[1] for r in cur.fetchall()}
+                cols = [c for c in cols if c in existing]
                 if not cols:
-                    self._status.set(f"Table '{table}' not found.")
+                    self._status.set(f"Table '{table}' not found or empty.")
                     conn.close()
                     return
+                col_sql = ", ".join(cols)
                 cur.execute(
-                    f"SELECT * FROM {table} ORDER BY id DESC LIMIT 100")
-                rows = cur.fetchall()
+                    f"SELECT {col_sql} FROM {table} ORDER BY id DESC LIMIT 100")
+                raw_rows = cur.fetchall()
+                rows = []
+                for row in raw_rows:
+                    cleaned = []
+                    for val, col in zip(row, cols):
+                        s = str(val) if val is not None else ""
+                        if col in self._LONG_COLS and len(s) > 80:
+                            s = s[:77] + "…"
+                        cleaned.append(s)
+                    rows.append(cleaned)
 
             conn.close()
 
-            # Set columns
             self._tree["columns"] = cols
             for col in cols:
                 self._tree.heading(col, text=col.replace("_", " ").title())
-                width = 180 if col in ("result", "verdict", "description",
-                                       "file_path", "domain") else 110
-                self._tree.column(col, width=width, minwidth=60)
+                if col in ("result", "verdict", "description"):
+                    w = 220
+                elif col in ("file_path", "domain", "target", "raw_output"):
+                    w = 180
+                elif col == "id":
+                    w = 50
+                else:
+                    w = 110
+                self._tree.column(col, width=w, minwidth=50)
 
-            # Insert rows with colour tagging
             self._tree.tag_configure("threat",
-                fg=RED, background="#fff0f0")
+                foreground=RED,       background="#2a0a0a")
             self._tree.tag_configure("clean",
-                fg="#1a7a3a", background="#f0fff4")
-            self._tree.tag_configure("warn",
-                fg="#b45309", background="#fffbeb")
+                foreground="#4ade80", background="#0a1f0a")
+            self._tree.tag_configure("partial",
+                foreground="#fbbf24", background="#1a1400")
+            self._tree.tag_configure("neutral",
+                foreground=T2,        background=CARD)
 
             for row in rows:
-                row_str = [str(v) if v is not None else "" for v in row]
+                row_str  = [str(v) if not isinstance(v, str) else v for v in row]
                 combined = " ".join(row_str).lower()
                 if any(w in combined for w in [
-                        "malicious", "threat", "backdoor",
-                        "critical", "high", "detected"]):
+                        "suspicious", "threat detected", "malicious",
+                        "backdoor detected", "reverse shell"]):
                     tag = "threat"
-                elif any(w in combined for w in [
-                        "clean", "benign", "no backdoor"]):
+                elif "clean" in combined or "no findings" in combined:
                     tag = "clean"
+                elif any(w in combined for w in [
+                        "partial", "not supported", "scan failed"]):
+                    tag = "partial"
                 else:
-                    tag = "warn"
+                    tag = "neutral"
                 self._tree.insert("", "end", values=row_str, tags=(tag,))
 
-            total = len(rows)
+            total   = len(rows)
             threats = sum(1 for r in self._tree.get_children()
                          if "threat" in self._tree.item(r)["tags"])
             self._status.set(
@@ -1818,36 +2390,38 @@ class ResultsViewer(tk.Frame):
             self._status.set(f"DB error: {e}")
 
     def _load_all(self, cur):
-        """Load summary rows from all scan tables."""
-        cols = ["id", "tool", "target_or_file", "verdict", "risk", "timestamp"]
+        """Load clean summary from scan_sessions — one authoritative row per scan."""
+        cols = ["ID", "Tool", "Target / File", "Verdict", "Risk Score", "Operator", "Timestamp"]
         rows = []
-
-        queries = [
-            ("Malware Scanner",
-             "SELECT id, file_name, result, confidence, timestamp FROM malware_scan_logs ORDER BY id DESC LIMIT 20"),
-            ("Backdoor Scanner",
-             "SELECT id, scan_type, verdict, risk_score, timestamp FROM backdoor_scans ORDER BY id DESC LIMIT 20"),
-            ("Domain Checker",
-             "SELECT id, domain, result, risk_score, timestamp FROM domain_logs ORDER BY id DESC LIMIT 20"),
-            ("Port Scanner",
-             "SELECT id, target, result, risk_score, timestamp FROM port_scans ORDER BY id DESC LIMIT 20"),
-            ("USB Scanner",
-             "SELECT id, usb_name, result, '0', timestamp FROM usb_scans ORDER BY id DESC LIMIT 20"),
-            ("Vulnerability Scanner",
-             "SELECT id, COALESCE(cve_id, 'N/A'), description, COALESCE(cvss_score, 0.0), timestamp FROM vuln_findings ORDER BY id DESC LIMIT 20"),
-        ]
-
-        for tool_name, query in queries:
-            try:
-                cur.execute(query)
-                for r in cur.fetchall():
-                    rows.append((r[0], tool_name, r[1], r[2], r[3], r[4]))
-            except Exception:
-                pass
-
-        # Sort by timestamp descending
-        rows.sort(key=lambda x: str(x[5]), reverse=True)
-        return rows[:100], cols
+        try:
+            cur.execute("""
+                SELECT id,
+                       tool_id,
+                       target,
+                       CASE
+                           WHEN threat = 1
+                                THEN 'SUSPICIOUS'
+                           WHEN risk_score >= 30
+                                THEN 'PARTIAL'
+                           WHEN raw_output LIKE '%SCAN FAILED%'
+                             OR raw_output LIKE '%NOT SUPPORTED%'
+                             OR raw_output LIKE '%Launch error%'
+                                THEN 'SCAN FAILED'
+                           ELSE 'CLEAN'
+                       END,
+                       risk_score,
+                       operator,
+                       COALESCE(finished_at, started_at)
+                FROM scan_sessions
+                ORDER BY id DESC
+                LIMIT 100
+            """)
+            for r in cur.fetchall():
+                tool_label = self._TOOL_LABELS.get(str(r[1]).lower(), str(r[1]).upper())
+                rows.append((r[0], tool_label, r[2], r[3], r[4], r[5], r[6]))
+        except Exception:
+            pass
+        return rows, cols
 
     def _clear(self):
         """Clear all scan results from DB."""
@@ -1857,16 +2431,18 @@ class ResultsViewer(tk.Frame):
             return
         try:
             conn = sqlite3.connect(str(DB_PATH))
-            for _, table in self.TABS[1:]:
+            for _, table, *_ in self.TABS[1:]:
                 try:
                     conn.execute(f"DELETE FROM {table}")
                 except Exception:
                     pass
-            # Also clear the parent vuln_scans table (not in TABS directly)
-            try:
-                conn.execute("DELETE FROM vuln_scans")
-            except Exception:
-                pass
+            # Clear supporting tables not listed in TABS
+            for extra in ["vuln_scans", "backdoor_findings",
+                          "port_findings", "usb_file_results", "scan_sessions"]:
+                try:
+                    conn.execute(f"DELETE FROM {extra}")
+                except Exception:
+                    pass
             conn.commit()
             conn.close()
             self._load()
@@ -1895,6 +2471,7 @@ class Dashboard(tk.Frame):
         self._stats["runs"] += 1
         if threat: self._stats["threats"] += 1
         self._topbar.refresh()
+        self._results_viewer._load()
 
     def _build(self):
         self._topbar = TopBar(
@@ -1906,7 +2483,8 @@ class Dashboard(tk.Frame):
 
         # Results bar at bottom
         tk.Frame(self, bg=BORDER, height=1).pack(side="bottom", fill="x")
-        ResultsViewer(self, self._user).pack(side="bottom", fill="x")
+        self._results_viewer = ResultsViewer(self, self._user)
+        self._results_viewer.pack(side="bottom", fill="x")
 
         # Tools in the middle
         body = tk.Frame(self, bg=BG)

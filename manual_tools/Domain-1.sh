@@ -1,5 +1,6 @@
 #!/bin/bash
 # ===== URL Fuzzer + Malicious URL Checker =====
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Colors
 RED="\e[31m"
@@ -61,6 +62,6 @@ while read path; do
             echo "[CLEAN] $full_url" >> "$output_file"
         fi
     fi
-done < wordlist.txt
+done < "$SCRIPT_DIR/wordlist.txt"
 
 echo -e "${GREEN}Fuzzing complete. Results saved in $output_file ${RESET}"

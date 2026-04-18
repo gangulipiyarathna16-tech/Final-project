@@ -1,0 +1,8 @@
+Target: 192.168.1.1
+Geo: ,  ()
+Scan Type: Quick
+====================
+21
+25
+
+Risk Score: 25/100

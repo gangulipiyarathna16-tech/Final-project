@@ -26,7 +26,7 @@ except ImportError:
         def __getattr__(self, k): return ""
     Fore = Style = _D()
 
-DB_PATH = Path.home() / "hybrid_vas" / "database" / "hybrid_vas.db"
+DB_PATH = Path(__file__).resolve().parent.parent / "database" / "hybrid_vas.db"
 
 # NVD API — free, no key required for basic use
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -140,7 +140,7 @@ def log_to_db(target, findings):
         conn    = sqlite3.connect(str(DB_PATH))
         cur     = conn.cursor()
         ts      = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        operator = os.environ.get("USER", "unknown")
+        operator = os.environ.get("USER", os.environ.get("USERNAME", "unknown"))
 
         cur.execute(
             "INSERT INTO vuln_scans (target, operator, timestamp) VALUES (?,?,?)",
@@ -151,11 +151,11 @@ def log_to_db(target, findings):
         for f in findings:
             cur.execute("""
                 INSERT INTO vuln_findings
-                (scan_id, cve_id, service, version, severity, cvss_score, description, timestamp)
-                VALUES (?,?,?,?,?,?,?,?)
+                (scan_id, cve_id, service, version, port, severity, cvss_score, description, timestamp)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (
                 scan_id, f["cve_id"], f["service"], f["version"],
-                f["severity"], f["cvss_score"], f.get("description", ""), ts
+                f.get("port"), f["severity"], f["cvss_score"], f.get("description", ""), ts
             ))
 
         conn.commit()
