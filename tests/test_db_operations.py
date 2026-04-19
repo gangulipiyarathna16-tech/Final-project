@@ -207,22 +207,22 @@ class TestDbSaveResult(unittest.TestCase):
     def test_malware_file_name_stored(self):
         self._save("malware", "/tmp/evil.exe", [], True)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertEqual(row[1], "evil.exe")        # file_name
+        self.assertEqual(row[2], "evil.exe")        # file_name
 
     def test_malware_file_path_stored(self):
         self._save("malware", "/tmp/evil.exe", [], True)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertEqual(row[2], "/tmp/evil.exe")   # file_path
+        self.assertEqual(row[3], "/tmp/evil.exe")   # file_path
 
     def test_malware_scan_method_is_static(self):
         self._save("malware", "/tmp/f.exe", [], False)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertEqual(row[7], "static")          # scan_method
+        self.assertEqual(row[8], "static")          # scan_method
 
     def test_malware_operator_stored(self):
         self._save("malware", "/tmp/f.exe", [], False)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertEqual(row[8], "test_op")         # operator
+        self.assertEqual(row[9], "test_op")         # operator
 
     # ── ai ───────────────────────────────────────────────────
     def test_ai_row_inserted(self):
@@ -232,12 +232,12 @@ class TestDbSaveResult(unittest.TestCase):
     def test_ai_scan_method_is_aiml(self):
         self._save("ai", "/tmp/s.bin", [], True)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertEqual(row[7], "AI/ML")           # scan_method
+        self.assertEqual(row[8], "AI/ML")           # scan_method
 
     def test_ai_confidence_is_0947(self):
         self._save("ai", "/tmp/s.bin", [], True)
         row = _rows(self.db_file, "malware_scan_logs")[0]
-        self.assertAlmostEqual(row[6], 0.947, places=3)  # confidence
+        self.assertAlmostEqual(row[7], 0.947, places=3)  # confidence
 
     # ── backdoor ─────────────────────────────────────────────
     def test_backdoor_row_inserted(self):
@@ -247,17 +247,17 @@ class TestDbSaveResult(unittest.TestCase):
     def test_backdoor_scan_type_stored(self):
         self._save("backdoor", None, [], False)
         row = _rows(self.db_file, "backdoor_scans")[0]
-        self.assertEqual(row[1], "full-system")     # scan_type
+        self.assertEqual(row[2], "full-system")     # scan_type
 
     def test_backdoor_threat_risk_score_90(self):
         self._save("backdoor", None, [], True)
         row = _rows(self.db_file, "backdoor_scans")[0]
-        self.assertEqual(row[7], 90)                # risk_score
+        self.assertEqual(row[8], 90)                # risk_score
 
     def test_backdoor_clean_risk_score_0(self):
         self._save("backdoor", None, [], False)
         row = _rows(self.db_file, "backdoor_scans")[0]
-        self.assertEqual(row[7], 0)                 # risk_score
+        self.assertEqual(row[8], 0)                 # risk_score
 
     # ── vuln ─────────────────────────────────────────────────
     def test_vuln_scan_row_inserted(self):
@@ -271,7 +271,7 @@ class TestDbSaveResult(unittest.TestCase):
     def test_vuln_target_stored(self):
         self._save("vuln", "10.0.0.5", [], True)
         row = _rows(self.db_file, "vuln_scans")[0]
-        self.assertEqual(row[1], "10.0.0.5")        # target
+        self.assertEqual(row[2], "10.0.0.5")        # target
 
     def test_vuln_finding_cve_stored(self):
         self._save("vuln", "10.0.0.5", [], True)    # threat=True
@@ -281,7 +281,7 @@ class TestDbSaveResult(unittest.TestCase):
     def test_vuln_finding_severity_critical_on_threat(self):
         self._save("vuln", "10.0.0.5", [], True)
         row = _rows(self.db_file, "vuln_findings")[0]
-        self.assertEqual(row[5], "CRITICAL")        # severity
+        self.assertEqual(row[6], "CRITICAL")        # severity (after port col)
 
     def test_vuln_scan_and_finding_linked(self):
         self._save("vuln", "10.0.0.5", [], True)
@@ -297,17 +297,17 @@ class TestDbSaveResult(unittest.TestCase):
     def test_domain_name_stored(self):
         self._save("domain", "evil.com", [], True)
         row = _rows(self.db_file, "domain_logs")[0]
-        self.assertEqual(row[1], "evil.com")        # domain
+        self.assertEqual(row[2], "evil.com")        # domain
 
     def test_domain_clean_risk_score_0(self):
         self._save("domain", "safe.com", [], False)
         row = _rows(self.db_file, "domain_logs")[0]
-        self.assertEqual(row[5], 0)                 # risk_score
+        self.assertEqual(row[6], 0)                 # risk_score
 
     def test_domain_threat_risk_score_90(self):
         self._save("domain", "bad.com", [], True)
         row = _rows(self.db_file, "domain_logs")[0]
-        self.assertEqual(row[5], 90)                # risk_score
+        self.assertEqual(row[6], 90)                # risk_score
 
     # ── port ─────────────────────────────────────────────────
     def test_port_row_inserted(self):
@@ -317,12 +317,12 @@ class TestDbSaveResult(unittest.TestCase):
     def test_port_target_stored(self):
         self._save("port", "192.168.50.1", [], False)
         row = _rows(self.db_file, "port_scans")[0]
-        self.assertEqual(row[1], "192.168.50.1")    # target
+        self.assertEqual(row[2], "192.168.50.1")    # target
 
     def test_port_scan_type_is_syn(self):
         self._save("port", "10.0.0.1", [], False)
         row = _rows(self.db_file, "port_scans")[0]
-        self.assertEqual(row[2], "SYN")             # scan_type
+        self.assertEqual(row[3], "SYN")             # scan_type
 
     # ── usb ──────────────────────────────────────────────────
     def test_usb_row_inserted(self):
@@ -332,7 +332,7 @@ class TestDbSaveResult(unittest.TestCase):
     def test_usb_device_name_stored(self):
         self._save("usb", None, [], False)
         row = _rows(self.db_file, "usb_scans")[0]
-        self.assertEqual(row[1], "USB Device")      # usb_name
+        self.assertEqual(row[2], "USB Device")      # usb_name
 
     # ── general ──────────────────────────────────────────────
     def test_multiple_saves_accumulate(self):
@@ -344,13 +344,13 @@ class TestDbSaveResult(unittest.TestCase):
         """A None target must not crash — it should store 'N/A'."""
         self._save("port", None, [], False)
         row = _rows(self.db_file, "port_scans")[0]
-        self.assertEqual(row[1], "N/A")
+        self.assertEqual(row[2], "N/A")
 
     def test_output_summary_truncated_to_80_chars(self):
         long_output = ["X" * 200]
         self._save("domain", "test.com", long_output, False)
         row = _rows(self.db_file, "domain_logs")[0]
-        self.assertLessEqual(len(row[4]), 80)       # result col
+        self.assertLessEqual(len(row[5]), 80)       # result col
 
 
 # ═════════════════════════════════════════════════════════════
@@ -578,8 +578,14 @@ class TestBackdoorScannerDB(unittest.TestCase):
 
     def _log(self, procs, conns, cron, startup, verdict, risk):
         import backdoor_scanner
+        results = {
+            "processes":   ("ok", procs),
+            "connections": ("ok", conns),
+            "cron":        ("ok", cron),
+            "startup":     ("ok", startup),
+        }
         with patch.object(backdoor_scanner, "DB_PATH", Path(self.db_file)):
-            backdoor_scanner.log_to_db(procs, conns, cron, startup, verdict, risk)
+            backdoor_scanner.log_to_db(results, verdict, risk)
 
     def test_threat_scan_stored(self):
         self._log(
@@ -637,6 +643,7 @@ class TestVulnScannerDB(unittest.TestCase):
         CREATE TABLE IF NOT EXISTS vuln_findings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_id INTEGER, cve_id TEXT, service TEXT, version TEXT,
+            port INTEGER,
             severity TEXT, cvss_score REAL, description TEXT,
             timestamp TEXT DEFAULT CURRENT_TIMESTAMP);
     """
@@ -688,12 +695,12 @@ class TestVulnScannerDB(unittest.TestCase):
     def test_severity_stored(self):
         self._log("10.0.0.5", [self._sample_finding(severity="HIGH")])
         row = _rows(self.db_file, "vuln_findings")[0]
-        self.assertEqual(row[5], "HIGH")
+        self.assertEqual(row[6], "HIGH")
 
     def test_cvss_score_stored(self):
         self._log("10.0.0.5", [self._sample_finding(cvss=7.5)])
         row = _rows(self.db_file, "vuln_findings")[0]
-        self.assertAlmostEqual(row[6], 7.5, places=1)
+        self.assertAlmostEqual(row[7], 7.5, places=1)
 
     def test_empty_findings_creates_scan_no_findings(self):
         self._log("10.0.0.10", [])

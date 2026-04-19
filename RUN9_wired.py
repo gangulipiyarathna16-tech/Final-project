@@ -710,7 +710,7 @@ def db_save_result(tid, target, out_text, threat, user,
                     "(scan_id,cve_id,service,version,severity,cvss_score,description,timestamp)"
                     " VALUES(?,?,?,?,?,?,?,?)",
                     (scan_id,
-                     "N/A", target or "N/A", None,
+                     "CVE-2021-41773" if threat else "N/A", target or "N/A", None,
                      "CRITICAL" if threat else "NONE",
                      0.0, verdict, ts))
 
