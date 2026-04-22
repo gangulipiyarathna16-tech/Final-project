@@ -191,6 +191,15 @@ run_scan() {
 
     save_to_db "$target" "$scan_type" "$(cat $report_file)" "$risk" "$geo"
     cat "$report_file"
+
+    if [[ $risk -ge 70 ]]; then
+        echo "VERDICT : HIGH RISK — $risk/100 risk score, critical ports exposed"
+    elif [[ $risk -ge 30 ]]; then
+        echo "VERDICT : SUSPICIOUS — $risk/100 risk score, review open ports"
+    else
+        echo "VERDICT : ALL PORTS CLEAN — risk score $risk/100"
+    fi
+
     generate_pdf "$report_file"
 }
 

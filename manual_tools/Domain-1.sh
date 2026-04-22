@@ -65,3 +65,10 @@ while read path; do
 done < "$SCRIPT_DIR/wordlist.txt"
 
 echo -e "${GREEN}Fuzzing complete. Results saved in $output_file ${RESET}"
+
+malicious_count=$(grep -c "\[MALICIOUS\]" "$output_file" 2>/dev/null || echo 0)
+if [[ "$malicious_count" -gt 0 ]]; then
+    echo "VERDICT : THREAT DETECTED — $malicious_count malicious URL(s) found"
+else
+    echo "VERDICT : URL IS CLEAN — no threats detected"
+fi

@@ -189,15 +189,20 @@ automatic_scan() {
     echo -e "${YELLOW}Detecting USB drives for automatic scan...${RESET}"
     detect_usb
     [[ ${#USB_LIST[@]} -eq 0 ]] && { echo -e "${RED}No USB drives detected.${RESET}"; return; }
+    overall="Clean"
     for usb in "${USB_LIST[@]}"; do
         echo -e "${CYAN}Scanning $usb (Quick Scan)${RESET}"
         quick_scan "$usb"
         generate_pdf_report "$usb" "Automatic Quick" "$AUTO_REPORT_DIR"
-        overall="Clean"
         for r in "${SCAN_RESULTS[@]}"; do [[ "$r" == *Malicious* ]] && overall="Issues Found"; done
         log_to_db "$usb" "Automatic" "Quick" "$overall"
     done
     echo -e "${GREEN}Automatic scan complete. Returning to main menu.${RESET}"
+    if [[ "$overall" == "Issues Found" ]]; then
+        echo "VERDICT : THREAT DETECTED — malicious files found on USB device"
+    else
+        echo "VERDICT : USB DEVICE IS CLEAN — no threats detected"
+    fi
 }
 
 # -------------------

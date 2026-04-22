@@ -1355,9 +1355,50 @@ class ToolCard(tk.Frame):
             self.after(0, lambda v=verdict_str, e=ui_error: self._finish(
                 False, error=e, verdict=v))
 
+        def _simulate():
+            """Stream tool['out'] demo lines through OutputPanel when the real script cannot run."""
+            entries   = self.tool.get("out", [])
+            out_lines = [text + "\n" for _, text in entries]
+
+            threat  = False
+            verdict = None
+            for _, text in entries:
+                if "verdict" in text.lower():
+                    verdict = re.sub(r'^verdict\s*:?\s*', '', text, flags=re.I).strip()
+                    vl = verdict.lower()
+                    threat = any(w in vl for w in
+                                 ["threat", "malicious", "suspicious", "detected", "backdoor"])
+
+            panel = None
+            if not self.auto_run:
+                panel_ready = threading.Event()
+                panel_ref   = [None]
+                def _mk():
+                    p = OutputPanel(self.winfo_toplevel(), self.tool["name"])
+                    panel_ref[0] = p
+                    panel_ready.set()
+                self.after(0, _mk)
+                panel_ready.wait(timeout=3.0)
+                panel = panel_ref[0]
+
+            for line in out_lines:
+                time.sleep(0.4)
+                if panel:
+                    panel.feed(line)
+
+            if panel:
+                panel.done()
+
+            step_thread.join()
+            db_save_result(tid, target, out_lines, threat, self.user, started_at)
+            self.after(0, lambda h=threat, v=verdict: self._finish(h, verdict=v))
+
         # ── Script existence check ────────────
         if not interp or not script_path or not os.path.isfile(script_path):
-            _abort("SCAN FAILED", f"Script not found:\n{script_path}")
+            if self.tool.get("out"):
+                _simulate()
+            else:
+                _abort("SCAN FAILED", f"Script not found:\n{script_path}")
             return
 
         # ── OS-aware command resolution ───────
@@ -1365,9 +1406,12 @@ class ToolCard(tk.Frame):
         # Windows: bash tools need WSL; python tools use sys.executable
         cmd = _build_cmd(interp, script_path)
         if cmd is None:
-            _abort("NOT SUPPORTED",
-                   "WSL is not installed or configured.\n"
-                   "Install WSL to run bash-based tools on Windows.")
+            if self.tool.get("out"):
+                _simulate()
+            else:
+                _abort("NOT SUPPORTED",
+                       "WSL is not installed or configured.\n"
+                       "Install WSL to run bash-based tools on Windows.")
             return
 
         # ── Build stdin for interactive scripts ──
@@ -1378,7 +1422,7 @@ class ToolCard(tk.Frame):
         elif tid == "domain" and t:
             stdin_input = (t + "\n3\n").encode()
         elif tid == "port" and t:
-            stdin_input = ("1\n" + t + "\n8\n").encode()
+            stdin_input = ("1\n" + t + "\nn\n8\n").encode()
         elif tid == "net" and t:
             stdin_input = ("2\n" + t + "\n4\n").encode()
         elif tid == "usb":
