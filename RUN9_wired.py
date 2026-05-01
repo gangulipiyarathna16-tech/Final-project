@@ -1096,6 +1096,7 @@ class OutputPanel(tk.Toplevel):
     """Live output window that streams subprocess stdout/stderr."""
     def __init__(self, parent, tool_name):
         super().__init__(parent)
+        self.transient(parent)   # keep panel attached to main window; no taskbar entry
         self.title(f"Output — {tool_name}")
         self.geometry("820x520")
         self.configure(bg=BG)
@@ -1103,6 +1104,7 @@ class OutputPanel(tk.Toplevel):
         self._queue = queue.Queue()
         self._proc  = None
         self._build()
+        parent.focus_force()     # return focus to main window so tabs stay clickable
         self._poll()
 
     def _build(self):
@@ -1148,33 +1150,48 @@ class OutputPanel(tk.Toplevel):
 
     def _poll(self):
         """Drain queue into text widget — called from main thread."""
+        lines = []
+        done  = False
         try:
             while True:
-                line = self._queue.get_nowait()
-                if line is None:
-                    rc = self._proc.returncode if self._proc else 0
-                    self._status.set(
-                        "✔ Scan complete — no threats" if rc == 0
-                        else f"⚠ Finished with exit code {rc}")
-                    return
-                self._append(line)
+                item = self._queue.get_nowait()
+                if item is None:
+                    done = True
+                    break
+                lines.append(item)
         except queue.Empty:
             pass
+
+        if lines:
+            self._text.configure(state="normal")
+            for line in lines:
+                self._text.insert("end", line, self._tag_for(line))
+            self._text.see("end")
+            self._text.configure(state="disabled")
+
+        if done:
+            rc = self._proc.returncode if self._proc else 0
+            self._status.set(
+                "✔ Scan complete — no threats" if rc == 0
+                else f"⚠ Finished with exit code {rc}")
+            return
         self.after(80, self._poll)
+
+    def _tag_for(self, line):
+        lo = line.lower()
+        if any(w in lo for w in ["error", "malicious", "threat", "backdoor", "critical", "detected"]):
+            return "err"
+        if any(w in lo for w in ["warn", "suspicious", "unknown", "high"]):
+            return "warn"
+        if any(w in lo for w in ["clean", "✔", "ok", "complete", "safe"]):
+            return "ok"
+        if line.startswith("#") or lo.startswith("[info]"):
+            return "dim"
+        return "info"
 
     def _append(self, line):
         self._text.configure(state="normal")
-        tag = "info"
-        lo  = line.lower()
-        if any(w in lo for w in ["error", "malicious", "threat", "backdoor", "critical", "detected"]):
-            tag = "err"
-        elif any(w in lo for w in ["warn", "suspicious", "unknown", "high"]):
-            tag = "warn"
-        elif any(w in lo for w in ["clean", "✔", "ok", "complete", "safe"]):
-            tag = "ok"
-        elif line.startswith("#") or lo.startswith("[info]"):
-            tag = "dim"
-        self._text.insert("end", line, tag)
+        self._text.insert("end", line, self._tag_for(line))
         self._text.see("end")
         self._text.configure(state="disabled")
 
