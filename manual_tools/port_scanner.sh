@@ -2,7 +2,7 @@
 
 # =========================
 # Hybrid_VAS Port Scanner
-# Version 1.3 - SABINAS
+# Version 1.3 - GANGULI
 # =========================
 
 # ----- Colors -----
@@ -163,33 +163,40 @@ run_scan() {
     echo -e "Target: $target\nGeo: $geo\nScan Type: $scan_type\n====================" > "$report_file"
 
     total_ports=$(echo $ports | wc -w)
-    echo -e "${CYAN}[INFO] Total ports: $total_ports | Threads: $max_threads${RESET}"
+    echo -e "${CYAN}[INFO] Total ports : $total_ports | Threads : $max_threads${RESET}"
+    echo -e "${CYAN}[INFO] Scanning — open ports will appear below ...${RESET}"
 
-    # Parallel scanning with progress bar
-    count=0
+    # Parallel scan — each subshell prints open ports directly to stdout
     ports_open=""
     for port in $ports; do
         (
-            res=$(banner_grab $target $port)
-            [ ! -z "$res" ] && echo "$port" >> "${report_file}.tmp"
-            ((count++))
-            show_progress $count $total_ports
+            if timeout 2 bash -c "</dev/tcp/$target/$port" &>/dev/null; then
+                banner=$(echo "" | nc -nv -w 2 "$target" "$port" 2>/dev/null | head -n 1)
+                echo -e "${GREEN}[OPEN]${RESET}  Port ${CYAN}${port}/tcp${RESET}${banner:+  —  $banner}"
+                echo "$port" >> "${report_file}.tmp"
+            fi
         ) &
         while (( $(jobs -r | wc -l) >= max_threads )); do sleep 0.05; done
     done
     wait
-    echo ""  # Newline after progress bar
 
     if [ -f "${report_file}.tmp" ]; then
-        ports_open=$(cat "${report_file}.tmp" | awk '{print $1}' | paste -sd "," -)
-        cat "${report_file}.tmp" >> "$report_file"
+        ports_open=$(sort -n "${report_file}.tmp" | paste -sd "," -)
+        open_count=$(wc -l < "${report_file}.tmp")
+        sort -n "${report_file}.tmp" | while read p; do
+            echo "$p/tcp  OPEN" >> "$report_file"
+        done
         rm "${report_file}.tmp"
+    else
+        open_count=0
     fi
 
     risk=$(compute_risk "$ports_open")
     echo -e "\nRisk Score: $risk/100" >> "$report_file"
 
     save_to_db "$target" "$scan_type" "$(cat $report_file)" "$risk" "$geo"
+    echo ""
+    echo -e "${CYAN}--- Scan Summary : ${open_count:-0} open port(s) found ---${RESET}"
     cat "$report_file"
 
     if [[ $risk -ge 70 ]]; then

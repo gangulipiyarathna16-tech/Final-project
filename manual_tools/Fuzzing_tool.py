@@ -8,8 +8,9 @@ import getpass
 
 # ---------- CONFIG ----------
 API_KEY = "560861232bb94d85dd87897058d35f4a7da76a8fe7e14e806ea15dd280c2dfc7"
-WORDLIST_FILE = "wordlist.txt"
-OUTPUT_DIR = "output"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WORDLIST_FILE = os.path.join(SCRIPT_DIR, "wordlist.txt")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
 # ----------------------------
 
 # Colors for terminal
@@ -67,24 +68,42 @@ def check_malicious(url):
         return f"{YELLOW}Scan Error: {e}{RESET}"
 
 # Start fuzzing
-print(f"{YELLOW}Fuzzing directories on {target}...{RESET}")
+if not os.path.isfile(WORDLIST_FILE):
+    print(f"{RED}[ERROR] Wordlist not found: {WORDLIST_FILE}{RESET}")
+    exit(1)
 
 with open(WORDLIST_FILE, "r") as f:
-    for path in f:
-        path = path.strip()
-        if not path:
-            continue
-        full_url = f"{target}/{path}"
-        try:
-            r = requests.get(full_url, timeout=5)
-            status = r.status_code
-        except requests.RequestException:
-            status = 0
+    paths = [line.strip() for line in f if line.strip()]
 
-        if status not in [0, 404]:
-            malicious_info = check_malicious(full_url)
-            print(f"{GREEN}[+] Found: {full_url} (Status: {status}) {malicious_info}{RESET}")
-            with open(output_file, "a") as out:
-                out.write(f"{full_url} (Status: {status}) {malicious_info}\n")
+total_paths = len(paths)
+print(f"{CYAN}[INFO] Loaded {total_paths} paths from wordlist{RESET}")
+print(f"{YELLOW}Fuzzing {target} ...{RESET}")
 
-print(f"{CYAN}Fuzzing complete. Results saved in {output_file}{RESET}")
+found_count = 0
+for idx, path in enumerate(paths, 1):
+    if idx % 50 == 0 or idx == total_paths:
+        print(f"{CYAN}[INFO] Progress : {idx}/{total_paths} paths tested{RESET}")
+    full_url = f"{target}/{path}"
+    try:
+        r = requests.get(full_url, timeout=5)
+        status = r.status_code
+    except requests.RequestException:
+        status = 0
+
+    if status not in [0, 404]:
+        found_count += 1
+        malicious_info = check_malicious(full_url)
+        print(f"{GREEN}[+] Found : {full_url}  (HTTP {status})  {malicious_info}{RESET}")
+        with open(output_file, "a") as out:
+            out.write(f"{full_url} (Status: {status})\n")
+
+print(f"\n{CYAN}--- Fuzzing Summary ---{RESET}")
+print(f"{YELLOW}Paths tested  : {total_paths}{RESET}")
+print(f"{GREEN}Paths found   : {found_count}{RESET}")
+
+if found_count == 0:
+    print(f"{YELLOW}[INFO] No accessible paths discovered.{RESET}")
+    print("VERDICT : URL IS CLEAN — no accessible paths found")
+else:
+    print(f"{CYAN}Results saved in {output_file}{RESET}")
+    print("VERDICT : SCAN COMPLETE — review found paths above")

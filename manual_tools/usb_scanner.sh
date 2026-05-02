@@ -25,13 +25,14 @@ RESET="\e[0m"
 # Dependency Check & Install
 # -------------------
 install_dependencies() {
-    echo -e "${CYAN}Checking and installing dependencies...${RESET}"
-    sudo apt-get update -y
-    dpkg -l | grep clamav >/dev/null 2>&1 || sudo apt-get install -y clamav clamav-daemon
-    dpkg -l | grep extundelete >/dev/null 2>&1 || sudo apt-get install -y extundelete
-    dpkg -l | grep python3 >/dev/null 2>&1 || sudo apt-get install -y python3
-    dpkg -l | grep python3-reportlab >/dev/null 2>&1 || sudo apt-get install -y python3-reportlab
-    dpkg -l | grep jq >/dev/null 2>&1 || sudo apt-get install -y jq
+    echo -e "${CYAN}[INFO] Checking dependencies...${RESET}"
+    sudo apt-get update -y >/dev/null 2>&1
+    dpkg -l | grep clamav >/dev/null 2>&1 || { echo -e "${YELLOW}[INFO] Installing clamav...${RESET}"; sudo apt-get install -y clamav clamav-daemon >/dev/null 2>&1; }
+    dpkg -l | grep extundelete >/dev/null 2>&1 || { echo -e "${YELLOW}[INFO] Installing extundelete...${RESET}"; sudo apt-get install -y extundelete >/dev/null 2>&1; }
+    dpkg -l | grep python3 >/dev/null 2>&1 || { echo -e "${YELLOW}[INFO] Installing python3...${RESET}"; sudo apt-get install -y python3 >/dev/null 2>&1; }
+    dpkg -l | grep python3-reportlab >/dev/null 2>&1 || { echo -e "${YELLOW}[INFO] Installing python3-reportlab...${RESET}"; sudo apt-get install -y python3-reportlab >/dev/null 2>&1; }
+    dpkg -l | grep jq >/dev/null 2>&1 || { echo -e "${YELLOW}[INFO] Installing jq...${RESET}"; sudo apt-get install -y jq >/dev/null 2>&1; }
+    echo -e "${GREEN}[INFO] Dependencies ready.${RESET}"
 }
 install_dependencies
 
@@ -81,11 +82,22 @@ quick_scan() {
     local usb_path="$1"
     SCAN_RESULTS=()
     mapfile -t files < <(find "$usb_path" -type f 2>/dev/null)
+    local total=${#files[@]}
+    echo -e "${CYAN}[INFO] Files to scan : $total${RESET}"
+    local idx=0
     for f in "${files[@]}"; do
-        clamscan --no-summary "$f" >/dev/null
+        ((idx++))
+        echo -ne "${CYAN}[SCAN] ($idx/$total) ${f##*/} ...${RESET}   \r"
+        clamscan --no-summary "$f" >/dev/null 2>&1
         status=$?
-        [[ $status -eq 0 ]] && SCAN_RESULTS+=("$f|Clean") || SCAN_RESULTS+=("$f|Malicious")
+        if [[ $status -eq 0 ]]; then
+            SCAN_RESULTS+=("$f|Clean")
+        else
+            echo -e "${RED}[THREAT] ${f##*/} — INFECTED                              ${RESET}"
+            SCAN_RESULTS+=("$f|Malicious")
+        fi
     done
+    echo -e "${GREEN}[INFO] Scan complete ($idx files checked).                    ${RESET}"
 }
 
 # -------------------
@@ -94,13 +106,23 @@ quick_scan() {
 deep_scan() {
     local usb_path="$1"
     SCAN_RESULTS=()
-    # Quick scan first
     mapfile -t files < <(find "$usb_path" -type f 2>/dev/null)
+    local total=${#files[@]}
+    echo -e "${CYAN}[INFO] Files to scan : $total${RESET}"
+    local idx=0
     for f in "${files[@]}"; do
-        clamscan --no-summary "$f" >/dev/null
+        ((idx++))
+        echo -ne "${CYAN}[SCAN] ($idx/$total) ${f##*/} ...${RESET}   \r"
+        clamscan --no-summary "$f" >/dev/null 2>&1
         status=$?
-        [[ $status -eq 0 ]] && SCAN_RESULTS+=("$f|Clean|No|-") || SCAN_RESULTS+=("$f|Malicious|No|-")
+        if [[ $status -eq 0 ]]; then
+            SCAN_RESULTS+=("$f|Clean|No|-")
+        else
+            echo -e "${RED}[THREAT] ${f##*/} — INFECTED                              ${RESET}"
+            SCAN_RESULTS+=("$f|Malicious|No|-")
+        fi
     done
+    echo -e "${GREEN}[INFO] File scan complete ($idx files checked).               ${RESET}"
     # Deleted files detection
     device=$(findmnt -n -o SOURCE "$usb_path")
     if [[ -n "$device" ]]; then
@@ -191,13 +213,18 @@ automatic_scan() {
     [[ ${#USB_LIST[@]} -eq 0 ]] && { echo -e "${RED}No USB drives detected.${RESET}"; return; }
     overall="Clean"
     for usb in "${USB_LIST[@]}"; do
-        echo -e "${CYAN}Scanning $usb (Quick Scan)${RESET}"
+        echo -e "${CYAN}[INFO] Scanning $usb (Quick Scan)${RESET}"
         quick_scan "$usb"
+        clean_count=0; threat_count=0
+        for r in "${SCAN_RESULTS[@]}"; do
+            if [[ "$r" == *Malicious* ]]; then ((threat_count++)); overall="Issues Found"
+            else ((clean_count++)); fi
+        done
+        echo -e "${YELLOW}[INFO] Results : ${GREEN}${clean_count} clean${RESET}  ${RED}${threat_count} threat(s)${RESET}"
         generate_pdf_report "$usb" "Automatic Quick" "$AUTO_REPORT_DIR"
-        for r in "${SCAN_RESULTS[@]}"; do [[ "$r" == *Malicious* ]] && overall="Issues Found"; done
         log_to_db "$usb" "Automatic" "Quick" "$overall"
     done
-    echo -e "${GREEN}Automatic scan complete. Returning to main menu.${RESET}"
+    echo ""
     if [[ "$overall" == "Issues Found" ]]; then
         echo "VERDICT : THREAT DETECTED — malicious files found on USB device"
     else
@@ -226,16 +253,34 @@ manual_scan() {
         scan_mode=$(echo "$scan_mode" | tr '[:upper:]' '[:lower:]')
         if [[ "$scan_mode" == "quick" ]]; then
             quick_scan "$usb"
+            clean_count=0; threat_count=0; overall="Clean"
+            for r in "${SCAN_RESULTS[@]}"; do
+                if [[ "$r" == *Malicious* ]]; then ((threat_count++)); overall="Issues Found"
+                else ((clean_count++)); fi
+            done
+            echo -e "${YELLOW}[INFO] Results : ${GREEN}${clean_count} clean${RESET}  ${RED}${threat_count} threat(s)${RESET}"
             generate_pdf_report "$usb" "Manual Quick" "$MANUAL_REPORT_DIR"
-            overall="Clean"
-            for r in "${SCAN_RESULTS[@]}"; do [[ "$r" == *Malicious* ]] && overall="Issues Found"; done
             log_to_db "$usb" "Manual" "Quick" "$overall"
+            if [[ "$overall" == "Issues Found" ]]; then
+                echo "VERDICT : THREAT DETECTED — malicious files found on USB device"
+            else
+                echo "VERDICT : USB DEVICE IS CLEAN — no threats detected"
+            fi
         elif [[ "$scan_mode" == "deep" ]]; then
             deep_scan "$usb"
+            clean_count=0; threat_count=0; overall="Clean"
+            for r in "${SCAN_RESULTS[@]}"; do
+                if [[ "$r" == *Malicious* ]]; then ((threat_count++)); overall="Issues Found"
+                else ((clean_count++)); fi
+            done
+            echo -e "${YELLOW}[INFO] Results : ${GREEN}${clean_count} clean${RESET}  ${RED}${threat_count} threat(s)${RESET}"
             generate_pdf_report "$usb" "Manual Deep" "$MANUAL_REPORT_DIR"
-            overall="Clean"
-            for r in "${SCAN_RESULTS[@]}"; do [[ "$r" == *Malicious* ]] && overall="Issues Found"; done
             log_to_db "$usb" "Manual" "Deep" "$overall"
+            if [[ "$overall" == "Issues Found" ]]; then
+                echo "VERDICT : THREAT DETECTED — malicious files found on USB device"
+            else
+                echo "VERDICT : USB DEVICE IS CLEAN — no threats detected"
+            fi
         else
             echo -e "${RED}Invalid scan type. Try again.${RESET}"
         fi

@@ -30,45 +30,70 @@ fi
 timestamp=$(date +"%Y%m%d_%H%M%S")
 output_file="output/fuzz_report_$timestamp.txt"
 
-echo -e "${YELLOW}Fuzzing directories on $target ..... ${RESET}"
+echo -e "${YELLOW}Fuzzing directories on $target ...${RESET}"
+
+# Warn if VirusTotal API key is not configured
+if [[ "$API_KEY" == "PUT-YOUR-API-KEY-HERE" || -z "$API_KEY" ]]; then
+    echo -e "${YELLOW}[!] VirusTotal API key not configured — threat analysis skipped${RESET}"
+    vt_enabled=0
+else
+    vt_enabled=1
+fi
+
+total_tested=0
+found_count=0
 
 # Fuzzing loop
-while read path; do
+while IFS= read -r path || [[ -n "$path" ]]; do
+    [[ -z "$path" ]] && continue
     full_url="${target}/${path}"
+    ((total_tested++))
     status=$(curl -m 10 -k -o /dev/null -s -w "%{http_code}" "$full_url")
 
-    if [[ "$status" != "404" ]]; then
-        echo -e "${GREEN}[+] Found: $full_url (Status: $status) ${RESET}"
-        echo "$full_url (Status: $status)" >> "$output_file"
+    # Skip connection errors (000) and not-found (404)
+    if [[ "$status" == "000" || "$status" == "404" ]]; then
+        continue
+    fi
 
-        # === Check maliciousness with VirusTotal ===
+    ((found_count++))
+    echo -e "${GREEN}[+] Found : $full_url  (HTTP $status)${RESET}"
+    echo "$full_url (Status: $status)" >> "$output_file"
+
+    # VirusTotal check (only if API key is configured)
+    if [[ $vt_enabled -eq 1 ]]; then
         vt_id=$(echo -n "$full_url" | base64 -w0 | tr -d '=')
-
-        vt_response=$(curl -s --request GET \
+        vt_response=$(curl -s --max-time 10 --request GET \
             --url "https://www.virustotal.com/api/v3/urls/$vt_id" \
             --header "x-apikey: $API_KEY")
-
-        # Extract malicious verdict safely (if JSON missing, mark error)
         malicious=$(echo "$vt_response" | jq -r '.data.attributes.last_analysis_stats.malicious // "error"')
 
         if [[ "$malicious" == "error" ]]; then
-            echo -e "${YELLOW}[!] VirusTotal lookup failed for $full_url ${RESET}"
+            echo -e "${YELLOW}    [!] VT lookup failed${RESET}"
             echo "[VT-ERROR] $full_url" >> "$output_file"
         elif [[ "$malicious" -gt 0 ]]; then
-            echo -e "${RED}[!] Malicious: $full_url ${RESET}"
+            echo -e "${RED}    [!] Malicious — $malicious engine(s) flagged${RESET}"
             echo "[MALICIOUS] $full_url" >> "$output_file"
         else
-            echo -e "${BLUE}[✓] Clean: $full_url ${RESET}"
+            echo -e "${BLUE}    [✓] Clean${RESET}"
             echo "[CLEAN] $full_url" >> "$output_file"
         fi
     fi
 done < "$SCRIPT_DIR/wordlist.txt"
 
-echo -e "${GREEN}Fuzzing complete. Results saved in $output_file ${RESET}"
+echo ""
+echo -e "${BLUE}--- Fuzzing Summary ---${RESET}"
+echo -e "${YELLOW}Paths tested  : $total_tested${RESET}"
+echo -e "${GREEN}Paths found   : $found_count${RESET}"
 
-malicious_count=$(grep -c "\[MALICIOUS\]" "$output_file" 2>/dev/null || echo 0)
-if [[ "$malicious_count" -gt 0 ]]; then
-    echo "VERDICT : THREAT DETECTED — $malicious_count malicious URL(s) found"
+if [[ $found_count -eq 0 ]]; then
+    echo -e "${YELLOW}[INFO] No accessible paths discovered.${RESET}"
+    echo "VERDICT : URL IS CLEAN — no accessible paths found"
 else
-    echo "VERDICT : URL IS CLEAN — no threats detected"
+    echo -e "${GREEN}Results saved in $output_file${RESET}"
+    malicious_count=$(grep -c "\[MALICIOUS\]" "$output_file" 2>/dev/null || echo 0)
+    if [[ "$malicious_count" -gt 0 ]]; then
+        echo "VERDICT : THREAT DETECTED — $malicious_count malicious URL(s) found"
+    else
+        echo "VERDICT : URL IS CLEAN — no threats detected"
+    fi
 fi

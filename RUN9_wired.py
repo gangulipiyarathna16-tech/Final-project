@@ -11,6 +11,9 @@ import sqlite3, hashlib, threading, time, random, datetime
 import subprocess, os, re, queue, sys
 from pathlib import Path
 
+# Strip ANSI/VT100 escape sequences and handle carriage-return overwrites
+_ANSI_RE = re.compile(r'\x1b(?:\[[0-9;]*[mGKHJABCDEFsuhl]?|[()][0-9A-Z]?)')
+
 # ── OS detection ─────────────────────────────────────────────
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX   = sys.platform.startswith("linux")
@@ -1165,7 +1168,9 @@ class OutputPanel(tk.Toplevel):
         if lines:
             self._text.configure(state="normal")
             for line in lines:
-                self._text.insert("end", line, self._tag_for(line))
+                cleaned = self._clean(line)
+                if cleaned.strip():
+                    self._text.insert("end", cleaned, self._tag_for(line))
             self._text.see("end")
             self._text.configure(state="disabled")
 
@@ -1177,21 +1182,49 @@ class OutputPanel(tk.Toplevel):
             return
         self.after(80, self._poll)
 
+    def _clean(self, line: str) -> str:
+        """Strip ANSI codes; collapse carriage-return overwrites to final value."""
+        ends_nl = line.endswith('\n')
+        if '\r' in line:
+            parts = line.rstrip('\n').split('\r')
+            result = ''
+            for seg in reversed(parts):
+                if seg.strip():
+                    result = seg
+                    break
+            line = result if result else parts[-1]
+        line = _ANSI_RE.sub('', line)
+        if ends_nl and not line.endswith('\n'):
+            line += '\n'
+        return line
+
     def _tag_for(self, line):
-        lo = line.lower()
-        if any(w in lo for w in ["error", "malicious", "threat", "backdoor", "critical", "detected"]):
+        lo = self._clean(line).lower()
+        if any(w in lo for w in [
+            "error", "malicious", "threat", "backdoor", "critical",
+            "detected", "✘", "high risk", "infected",
+        ]):
             return "err"
-        if any(w in lo for w in ["warn", "suspicious", "unknown", "high"]):
+        if any(w in lo for w in [
+            "warn", "suspicious", "unknown", "[!]", "high",
+            "flagged", "risk",
+        ]):
             return "warn"
-        if any(w in lo for w in ["clean", "✔", "ok", "complete", "safe"]):
+        if any(w in lo for w in [
+            "clean", "✔", "[+]", "[open]", "complete", "safe",
+            "recognised", "trusted", "installed", "ready", "ok",
+        ]):
             return "ok"
-        if line.startswith("#") or lo.startswith("[info]"):
+        if lo.strip().startswith("#") or "[info]" in lo or "progress:" in lo:
             return "dim"
         return "info"
 
     def _append(self, line):
+        cleaned = self._clean(line)
+        if not cleaned.strip():
+            return
         self._text.configure(state="normal")
-        self._text.insert("end", line, self._tag_for(line))
+        self._text.insert("end", cleaned, self._tag_for(line))
         self._text.see("end")
         self._text.configure(state="disabled")
 

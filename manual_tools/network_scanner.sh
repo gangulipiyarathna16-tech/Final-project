@@ -36,7 +36,8 @@ check_deps() {
 #  BANNER
 # ─────────────────────────────────────────────────
 banner() {
-    clear
+    # Only clear when running interactively in a real terminal
+    [[ -t 1 ]] && clear
     echo -e "${CYAN}============================================="
     echo "   Hybrid_VAS — Network Scanner v1.0"
     echo "   $(date '+%Y-%m-%d %H:%M:%S')"
@@ -93,8 +94,8 @@ resolve_hostname() {
 # ─────────────────────────────────────────────────
 os_fingerprint() {
     local ip="$1"
-    sudo nmap -O --osscan-guess -T4 -p 22,80,443 "$ip" 2>/dev/null | \
-        grep "OS guess\|OS details\|Running:" | head -2 | awk -F': ' '{print $2}' | tr '\n' ' '
+    timeout 5 sudo nmap -O --osscan-guess -T4 -p 22,80,443 "$ip" 2>/dev/null | \
+        grep "OS guess\|OS details\|Running:" | head -1 | awk -F': ' '{print $2}' | tr -d '\n'
 }
 
 # ─────────────────────────────────────────────────
@@ -165,13 +166,14 @@ run_scan() {
 
         hostname=$(resolve_hostname "$ip")
 
+        os_info=$(os_fingerprint "$ip")
         status="KNOWN"
         if [[ -z "$mac" || "$mac" == "(Unknown)" ]]; then
             status="UNKNOWN"
             unknown=$((unknown + 1))
-            echo -e "${RED}  [!] UNKNOWN HOST: $ip  $mac  $vendor${RESET}"
+            echo -e "${RED}  [!] UNKNOWN HOST : $ip  $mac  ${vendor:-?}${RESET}"
         else
-            echo -e "${GREEN}  [+] $ip  $mac  ${vendor:-?}  $hostname${RESET}"
+            echo -e "${GREEN}  [+] $ip  $mac  ${vendor:-?}  ${hostname:-unknown}${os_info:+  [${os_info}]}${RESET}"
         fi
 
         HOST_DATA+=("$ip|$mac|$hostname|${vendor:-Unknown}|$status")
