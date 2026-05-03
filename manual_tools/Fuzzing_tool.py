@@ -7,7 +7,7 @@ from datetime import datetime
 import getpass
 
 # ---------- CONFIG ----------
-API_KEY = "560861232bb94d85dd87897058d35f4a7da76a8fe7e14e806ea15dd280c2dfc7"
+API_KEY = "PUT-YOUR-API-KEY-HERE"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORDLIST_FILE = os.path.join(SCRIPT_DIR, "wordlist.txt")
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")

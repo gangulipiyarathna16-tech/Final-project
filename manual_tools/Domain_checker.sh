@@ -30,7 +30,7 @@ RED="\e[1;31m"
 AMBER="\e[1;33m"
 WHITE="\e[1;37m"
 DIM="\e[2;37m"
-GREEN="\e[0;32m"        # BUG FIX #1: GREEN was used on line 532 but never defined
+GREEN="\e[0;32m"
 BOLD="\e[1m"
 BLINK="\e[5m"
 RESET="\e[0m"
@@ -294,7 +294,6 @@ run_virustotal() {
         --header "x-apikey: $API_KEY" 2>/dev/null)
 
     http_code=$(echo "$response" | tail -1)
-    # BUG FIX #2: head -n -1 is not portable (fails on macOS/BSD); use sed instead
     body=$(echo "$response" | sed '$d')
 
     if [[ "$http_code" != "200" ]]; then
@@ -312,7 +311,6 @@ run_virustotal() {
     VT_CATEGORIES=$(echo "$body" | jq -r '.data.attributes.categories | to_entries[] | .value' 2>/dev/null | sort -u | head -5 | tr '\n' ',')
     VT_REPUTATION=$(echo "$body" | jq -r '.data.attributes.reputation' 2>/dev/null)
 
-    # BUG FIX #3: jq failures fall through as empty string, not "0"; guard all null/empty values
     [[ -z "$VT_MALICIOUS"  || "$VT_MALICIOUS"  == "null" ]] && VT_MALICIOUS=0
     [[ -z "$VT_SUSPICIOUS" || "$VT_SUSPICIOUS" == "null" ]] && VT_SUSPICIOUS=0
     [[ -z "$VT_CLEAN"      || "$VT_CLEAN"      == "null" ]] && VT_CLEAN=0
@@ -340,10 +338,8 @@ calculate_risk() {
 
     if [[ "$CREATED" != "N/A" && -n "$CREATED" ]]; then
         local created_year current_year age
-        # BUG FIX #4: grep -oP is not portable; use grep -oE which works on GNU+BSD
         created_year=$(echo "$CREATED" | grep -oE '^[0-9]{4}')
         current_year=$(date +%Y)
-        # BUG FIX #5: arithmetic comparison requires numeric values; guard against empty
         if [[ -n "$created_year" ]]; then
             age=$((current_year - created_year))
             [[ $age -lt 1 ]] && score=$((score + 20))
@@ -491,7 +487,6 @@ run_scan() {
     divider
     echo -e "  ${MATRIX}[✔]${RESET} Result saved to database."
 
-    # BUG FIX #6: \c is not portable in echo -e for suppressing newline; use printf or echo -n
     echo -ne "\n  ${CYAN}[?]${RESET} Export report to file? ${AMBER}(y/n)${RESET}: "
     read -r export_choice
     [[ "$export_choice" =~ ^[Yy]$ ]] && export_report "$domain"
@@ -522,7 +517,6 @@ domain_checker() {
 
     while true; do
         echo -e "${MATRIX}[▸]${AMBER} Enter domain to scan ${DIM}(or 'history' / 'exit')${RESET}"
-        # BUG FIX #1 (usage): $GREEN was referenced here but not defined — now defined above
         echo -ne "${MATRIX}  ➜ ${GREEN}"
         read -r domain
         echo -ne "${RESET}"
