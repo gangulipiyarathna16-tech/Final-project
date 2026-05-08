@@ -519,7 +519,13 @@ domain_checker() {
         echo -e "${MATRIX}[▸]${AMBER} Enter domain to scan ${DIM}(or 'history' / 'exit')${RESET}"
         echo -ne "${MATRIX}  ➜ ${GREEN}"
         read -r domain
+        local read_status=$?
         echo -ne "${RESET}"
+
+        # Exit cleanly on EOF or empty input from non-TTY stdin (GUI/pipe mode)
+        if [[ $read_status -ne 0 ]] || [[ -z "$domain" && ! -t 0 ]]; then
+            exit 0
+        fi
 
         case "$domain" in
             exit|quit|q)
@@ -540,7 +546,8 @@ domain_checker() {
         run_scan "$domain"
 
         post_scan_menu
-        read -r choice
+        read -r choice || exit 0
+        [[ -z "$choice" && ! -t 0 ]] && exit 0
         case "$choice" in
             1)  show_banner ;;
             2)  view_history ;;

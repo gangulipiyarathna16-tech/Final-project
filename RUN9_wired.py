@@ -1470,7 +1470,7 @@ class ToolCard(tk.Frame):
         if tid == "url" and t:
             stdin_input = (t + "\n").encode()
         elif tid == "domain" and t:
-            stdin_input = (t + "\n3\n").encode()
+            stdin_input = (t + "\nn\n3\n").encode()  # domain, no export, exit menu
         elif tid == "port" and t:
             stdin_input = ("1\n" + t + "\nn\n8\n").encode()
         elif tid == "net" and t:
@@ -2264,18 +2264,89 @@ class ResultsViewer(tk.Frame):
     TABS = [
         ("All Scans",     None,                  None),
         ("Malware",       "malware_scan_logs",
-         "id,file_name,result,malware_family,confidence,scan_method,operator,timestamp"),
+         "file_name,result,malware_family,confidence,operator,timestamp"),
         ("Backdoor",      "backdoor_scans",
-         "id,scan_type,suspicious_pids,suspicious_ports,cron_findings,startup_findings,verdict,risk_score,operator,timestamp"),
+         "suspicious_pids,suspicious_ports,cron_findings,startup_findings,verdict,risk_score,operator,timestamp"),
         ("Vulnerability", "vuln_findings",
-         "id,cve_id,service,version,port,severity,cvss_score,description,timestamp"),
+         "cve_id,service,version,port,severity,cvss_score,description,timestamp"),
         ("Domain",        "domain_logs",
-         "id,domain,ip_address,registrar,result,risk_score,operator,timestamp"),
+         "domain,ip_address,registrar,result,risk_score,operator,timestamp"),
         ("Port",          "port_scans",
-         "id,target,scan_type,result,risk_score,operator,timestamp"),
+         "target,scan_type,result,operator,timestamp"),
         ("USB",           "usb_scans",
-         "id,usb_name,device_path,files_scanned,threats_found,result,operator,timestamp"),
+         "usb_name,device_path,files_scanned,threats_found,result,operator,timestamp"),
     ]
+
+    # Human-readable heading labels
+    _COL_LABELS = {
+        "file_name":        "File",
+        "result":           "Verdict",
+        "malware_family":   "Family",
+        "confidence":       "Confidence",
+        "operator":         "Operator",
+        "timestamp":        "Time",
+        "suspicious_pids":  "Susp. PIDs",
+        "suspicious_ports": "Susp. Ports",
+        "cron_findings":    "Cron Jobs",
+        "startup_findings": "Startup",
+        "verdict":          "Verdict",
+        "risk_score":       "Risk",
+        "cve_id":           "CVE ID",
+        "service":          "Service",
+        "version":          "Version",
+        "port":             "Port",
+        "severity":         "Severity",
+        "cvss_score":       "CVSS",
+        "description":      "Description",
+        "domain":           "Domain",
+        "ip_address":       "IP Address",
+        "registrar":        "Registrar",
+        "target":           "Target",
+        "scan_type":        "Scan Type",
+        "usb_name":         "Device",
+        "device_path":      "Mount Path",
+        "files_scanned":    "Files",
+        "threats_found":    "Threats",
+    }
+
+    # Per-column pixel widths
+    _COL_WIDTHS = {
+        "file_name":        180,
+        "result":           200,
+        "verdict":          200,
+        "malware_family":   120,
+        "confidence":        90,
+        "operator":          90,
+        "timestamp":        150,
+        "suspicious_pids":  140,
+        "suspicious_ports": 140,
+        "cron_findings":    150,
+        "startup_findings": 150,
+        "risk_score":        70,
+        "cve_id":           150,
+        "service":          130,
+        "version":           90,
+        "port":              60,
+        "severity":          90,
+        "cvss_score":        70,
+        "description":      240,
+        "domain":           180,
+        "ip_address":       120,
+        "registrar":        160,
+        "target":           170,
+        "scan_type":        100,
+        "usb_name":         150,
+        "device_path":      190,
+        "files_scanned":     70,
+        "threats_found":     70,
+        # All Scans columns
+        "Tool":             130,
+        "Target / File":    200,
+        "Verdict":          180,
+        "Risk Score":        70,
+        "Operator":          90,
+        "Time":             150,
+    }
 
     def __init__(self, parent, user, **kw):
         super().__init__(parent, bg=BG, **kw)
@@ -2328,6 +2399,31 @@ class ResultsViewer(tk.Frame):
                 command=lambda idx=i: self._switch(idx))
             btn.pack(side="left")
             self._tab_btns.append(btn)
+
+        # ── Success-rate strip ────────────────────────────────────
+        rate_outer = tk.Frame(self, bg=PANEL)
+        rate_outer.pack(fill="x")
+
+        tk.Label(rate_outer, text="Success Rate per Tool",
+                 bg=PANEL, fg=T2, font=fnt(9, True),
+                 padx=14, pady=4).pack(side="left")
+
+        # Scrollable canvas so cards don't overflow on small screens
+        self._rate_cv = tk.Canvas(rate_outer, bg=PANEL,
+                                  height=62, highlightthickness=0)
+        self._rate_sb = tk.Scrollbar(rate_outer, orient="horizontal",
+                                     command=self._rate_cv.xview,
+                                     bg=PANEL, troughcolor=PANEL)
+        self._rate_inner = tk.Frame(self._rate_cv, bg=PANEL)
+        self._rate_inner.bind(
+            "<Configure>",
+            lambda e: self._rate_cv.configure(
+                scrollregion=self._rate_cv.bbox("all")))
+        self._rate_cv.create_window((0, 0), window=self._rate_inner, anchor="nw")
+        self._rate_cv.configure(xscrollcommand=self._rate_sb.set)
+        self._rate_cv.pack(side="left", fill="x", expand=True)
+
+        tk.Frame(rate_outer, bg=BORDER, width=1).pack(side="right", fill="y")
 
         # Treeview table
         sty = ttk.Style()
@@ -2437,15 +2533,9 @@ class ResultsViewer(tk.Frame):
 
             self._tree["columns"] = cols
             for col in cols:
-                self._tree.heading(col, text=col.replace("_", " ").title())
-                if col in ("result", "verdict", "description"):
-                    w = 220
-                elif col in ("file_path", "domain", "target", "raw_output"):
-                    w = 180
-                elif col == "id":
-                    w = 50
-                else:
-                    w = 110
+                label = self._COL_LABELS.get(col, col.replace("_", " ").title())
+                w = self._COL_WIDTHS.get(col, 110)
+                self._tree.heading(col, text=label)
                 self._tree.column(col, width=w, minwidth=50)
 
             self._tree.tag_configure("threat",
@@ -2483,14 +2573,102 @@ class ResultsViewer(tk.Frame):
         except Exception as e:
             self._status.set(f"DB error: {e}")
 
+        self._refresh_rates()
+
+    def _refresh_rates(self):
+        """Rebuild the per-tool success-rate strip from scan_sessions."""
+        for w in self._rate_inner.winfo_children():
+            w.destroy()
+
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            cur  = conn.cursor()
+            cur.execute("""
+                SELECT tool_id,
+                       COUNT(*) AS total,
+                       SUM(CASE
+                           WHEN threat = 0
+                                AND (raw_output NOT LIKE '%SCAN FAILED%')
+                                AND (raw_output NOT LIKE '%NOT SUPPORTED%')
+                                AND (raw_output NOT LIKE '%Launch error%')
+                           THEN 1 ELSE 0 END) AS clean
+                FROM scan_sessions
+                GROUP BY tool_id
+                ORDER BY tool_id
+            """)
+            rows = cur.fetchall()
+            conn.close()
+        except Exception:
+            rows = []
+
+        if not rows:
+            tk.Label(self._rate_inner, text="No scans yet",
+                     bg=PANEL, fg=T4, font=fnt(10),
+                     padx=16, pady=18).pack(side="left")
+            return
+
+        # Tool display order: manual first, then automated
+        _ORDER = ["url","domain","port","net","usb",
+                  "malware","ai","backdoor","vuln","cuckoo"]
+        rows_sorted = sorted(rows,
+            key=lambda r: _ORDER.index(r[0]) if r[0] in _ORDER else 99)
+
+        CARD_W = 108
+        for tool_id, total, clean in rows_sorted:
+            clean   = clean or 0
+            pct     = int(clean / total * 100) if total else 0
+            label   = self._TOOL_LABELS.get(tool_id, tool_id.upper())
+            # Shorten label to fit card width
+            short   = label.replace(" Scanner", "").replace(" Detector", "")
+
+            bar_col = (GREEN if pct >= 80
+                       else AMBER if pct >= 50
+                       else RED)
+            pct_fg  = bar_col
+
+            card = tk.Frame(self._rate_inner, bg=CARD,
+                            highlightthickness=1,
+                            highlightbackground=BORDER,
+                            width=CARD_W)
+            card.pack(side="left", padx=4, pady=6, fill="y")
+            card.pack_propagate(False)
+
+            # Colour accent bar at top
+            tk.Frame(card, bg=bar_col, height=3).pack(fill="x")
+
+            inner = tk.Frame(card, bg=CARD, padx=6, pady=3)
+            inner.pack(fill="both", expand=True)
+
+            tk.Label(inner, text=short, bg=CARD, fg=T2,
+                     font=fnt(9, True),
+                     wraplength=CARD_W - 14,
+                     justify="center").pack()
+
+            tk.Label(inner, text=f"{pct}%",
+                     bg=CARD, fg=pct_fg,
+                     font=fnt(13, True)).pack()
+
+            # Mini progress bar (canvas)
+            cv = tk.Canvas(inner, bg=BORDER,
+                           height=4, width=CARD_W - 20,
+                           highlightthickness=0)
+            cv.pack(pady=(2, 1))
+            filled_w = int((CARD_W - 20) * pct / 100)
+            if filled_w > 0:
+                cv.create_rectangle(0, 0, filled_w, 4,
+                                    fill=bar_col, outline="")
+
+            tk.Label(inner, text=f"{clean}/{total} clean",
+                     bg=CARD, fg=T3,
+                     font=fnt(8)).pack()
+
     def _load_all(self, cur):
         """Load clean summary from scan_sessions — one authoritative row per scan."""
-        cols = ["ID", "Tool", "Target / File", "Verdict", "Risk Score", "Operator", "Timestamp"]
+        cols = ["Tool", "Target / File", "Verdict", "Risk Score", "Operator", "Time"]
         rows = []
         try:
             cur.execute("""
-                SELECT id,
-                       tool_id,
+                SELECT tool_id,
                        target,
                        CASE
                            WHEN threat = 1
@@ -2511,8 +2689,8 @@ class ResultsViewer(tk.Frame):
                 LIMIT 100
             """)
             for r in cur.fetchall():
-                tool_label = self._TOOL_LABELS.get(str(r[1]).lower(), str(r[1]).upper())
-                rows.append((r[0], tool_label, r[2], r[3], r[4], r[5], r[6]))
+                tool_label = self._TOOL_LABELS.get(str(r[0]).lower(), str(r[0]).upper())
+                rows.append((tool_label, r[1], r[2], r[3], r[4], r[5]))
         except Exception:
             pass
         return rows, cols
