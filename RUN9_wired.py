@@ -2928,8 +2928,11 @@ class LoginScreen(tk.Frame):
                 highlightcolor=BLUE,
                 width=26)
             e.pack(fill="x", ipady=11)
-            if label == "Username": e.focus()
-            if show:
+            if label == "Username":
+                e.focus()
+                self._uentry = e
+            else:
+                self._pentry = e
                 e.bind("<Return>",
                        lambda ev: self._auth())
 
@@ -2941,7 +2944,7 @@ class LoginScreen(tk.Frame):
             anchor="w", pady=(12, 4))
 
         # Sign in button
-        tk.Button(
+        self._signin_btn = tk.Button(
             form, text="Sign In  →",
             bg=BLUE, fg="#ffffff",
             font=(F, 13, "bold"),
@@ -2950,14 +2953,34 @@ class LoginScreen(tk.Frame):
             activebackground=BLUEH,
             activeforeground="#ffffff",
             command=self._auth
-        ).pack(fill="x", ipady=13,
-               pady=(4, 0))
+        )
+        self._signin_btn.pack(fill="x", ipady=13,
+                              pady=(4, 0))
+
+        # Try-again button (hidden until locked)
+        self._retry_btn = tk.Button(
+            form, text="Try Again",
+            bg=PANEL, fg=T1,
+            font=fnt(12),
+            relief="flat", bd=0,
+            cursor="hand2",
+            activebackground=BORDER,
+            activeforeground=T1,
+            command=self._reset_lock
+        )
+
+    def _reset_lock(self):
+        self._attempts = 0
+        self._msg.set("")
+        self._signin_btn.config(state="normal",
+                                bg=BLUE, cursor="hand2")
+        for w in (self._uentry, self._pentry):
+            w.config(state="normal")
+        self._retry_btn.pack_forget()
+        self._uentry.focus()
 
     def _auth(self):
         if self._attempts >= 3:
-            self._msg.set(
-                "Account locked. "
-                "Restart the application.")
             return
         user = db_login(
             self._uvar.get().strip(),
@@ -2967,12 +2990,21 @@ class LoginScreen(tk.Frame):
         else:
             self._attempts += 1
             left = 3 - self._attempts
-            self._msg.set(
-                f"Invalid credentials. "
-                f"{left} attempt"
-                f"{'s' if left != 1 else ''} "
-                "remaining."
-                if left else "Account locked.")
+            if left:
+                self._msg.set(
+                    f"Invalid credentials. "
+                    f"{left} attempt"
+                    f"{'s' if left != 1 else ''} "
+                    "remaining.")
+            else:
+                self._msg.set("Account locked.")
+                self._signin_btn.config(
+                    state="disabled",
+                    bg="#555", cursor="")
+                for w in (self._uentry, self._pentry):
+                    w.config(state="disabled")
+                self._retry_btn.pack(
+                    fill="x", ipady=10, pady=(6, 0))
 
 # ═══════════════════════════════════════════════════════
 #  APPLICATION

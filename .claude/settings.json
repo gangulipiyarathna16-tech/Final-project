@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(sqlite3 \"database/hybrid_vas.db\" \".tables\")"
+      "Bash(sqlite3 \"database/hybrid_vas.db\" \".tables\")",
+      "Bash(python -c \"import sqlite3; c = sqlite3.connect\\('hce_final.db'\\); print\\(c.execute\\('SELECT id,username,role,active FROM users'\\).fetchall\\(\\)\\); c.close\\(\\)\")",
+      "Bash(python -c \"import RUN9_wired; print\\('Import OK'\\)\")",
+      "Bash(python -c \"import RUN9_wired; RUN9_wired.init_db\\(\\); print\\('DB init OK'\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('RUN9_wired.py', doraise=True\\); print\\('Syntax OK'\\)\")"
     ]
   }
 }
