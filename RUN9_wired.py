@@ -1493,6 +1493,7 @@ class ToolCard(tk.Frame):
             env["TERM"] = "dumb"
             env["DEBIAN_FRONTEND"] = "noninteractive"
             env["PYTHONIOENCODING"] = "utf-8:replace"
+            env["HCE_GUI_CAPTURE"] = "1"
 
             proc = subprocess.Popen(
                 cmd,
