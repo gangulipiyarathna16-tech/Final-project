@@ -8,7 +8,7 @@
 # Configurations
 # -------------------
 TOOL_NAME="Hybrid USB Scanner"
-AUTHOR="SABINAS"
+AUTHOR="GANGULI"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BASE_DIR="$PROJECT_ROOT/reports/usb_scanner"

@@ -3,6 +3,7 @@
 # =========================
 # Hybrid_VAS Port Scanner
 # Version 1.3 - GANGULI
+# Author: GANGULI
 # =========================
 
 # ----- Colors -----
