@@ -1,7 +1,7 @@
 #!/bin/bash
 # ====================================
 # Hybrid USB Scanner Tool - Main DB Version
-# Author: SABINAS
+# Author: GANGULI
 # ====================================
 
 # -------------------
