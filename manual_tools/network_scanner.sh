@@ -1,56 +1,65 @@
 #!/bin/bash
 # ============================================================
-#   Hybrid Cybersecurity Engine — Network Scanner
+#   Hybrid Cybersecurity Engine - Network Scanner
 #   Author  : GANGULI
-#   Version : 1.0
-#   Deps    : arp-scan, nmap, sqlite3, curl, jq
+#   Version : 1.1
+#   Deps    : arp-scan or nmap, sqlite3
 # ============================================================
 
 RED="\e[31m"
 GREEN="\e[32m"
 YELLOW="\e[33m"
 CYAN="\e[36m"
-MAGENTA="\e[35m"
 RESET="\e[0m"
 
-DB_FILE="$HOME/hybrid_vas/database/hybrid_vas.db"
-REPORT_DIR="$HOME/hybrid_vas/reports"
-LOG_FILE="$HOME/hybrid_vas/logs/network_scanner.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DB_FILE="$PROJECT_ROOT/database/hybrid_vas.db"
+REPORT_DIR="$PROJECT_ROOT/reports"
+LOG_FILE="$PROJECT_ROOT/logs/network_scanner.log"
 
-mkdir -p "$REPORT_DIR" "$(dirname "$LOG_FILE")"
+mkdir -p "$REPORT_DIR" "$(dirname "$LOG_FILE")" "$(dirname "$DB_FILE")"
 
-# ─────────────────────────────────────────────────
-#  DEPENDENCY CHECK
-# ─────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Dependency check
+# ------------------------------------------------------------
 check_deps() {
-    for cmd in arp-scan nmap sqlite3 curl jq; do
-        if ! command -v "$cmd" &>/dev/null; then
-            echo -e "${YELLOW}[!] $cmd not found. Installing...${RESET}"
-            sudo apt-get install -y "$cmd" &>/dev/null
-        fi
-    done
-    echo -e "${GREEN}[✔] Dependencies ready.${RESET}"
+    local missing=()
+
+    command -v sqlite3 >/dev/null 2>&1 || missing+=("sqlite3")
+    if ! command -v arp-scan >/dev/null 2>&1 && ! command -v nmap >/dev/null 2>&1; then
+        missing+=("arp-scan or nmap")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo -e "${RED}[ERROR] Missing dependencies: ${missing[*]}${RESET}"
+        echo -e "${YELLOW}[INFO] Install on Debian/Kali/Ubuntu with:${RESET}"
+        echo "sudo apt-get install -y arp-scan nmap sqlite3 dnsutils"
+        exit 1
+    fi
+
+    echo -e "${GREEN}[OK] Dependencies ready.${RESET}"
 }
 
-# ─────────────────────────────────────────────────
-#  BANNER
-# ─────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Banner
+# ------------------------------------------------------------
 banner() {
-    # Only clear when running interactively in a real terminal
     [[ -t 1 ]] && clear
     echo -e "${CYAN}============================================="
-    echo "   Hybrid_VAS — Network Scanner v1.0"
+    echo "   Hybrid_VAS - Network Scanner v1.1"
     echo "   $(date '+%Y-%m-%d %H:%M:%S')"
     echo -e "=============================================${RESET}"
 }
 
-# ─────────────────────────────────────────────────
-#  DB — ensure table exists
-# ─────────────────────────────────────────────────
+# ------------------------------------------------------------
+# DB - direct CLI logging tables
+# ------------------------------------------------------------
 init_db() {
     sqlite3 "$DB_FILE" <<SQL
 CREATE TABLE IF NOT EXISTS network_scans (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    INTEGER,
     subnet        TEXT,
     hosts_found   INTEGER DEFAULT 0,
     unknown_hosts INTEGER DEFAULT 0,
@@ -71,41 +80,80 @@ CREATE TABLE IF NOT EXISTS network_hosts (
 SQL
 }
 
-# ─────────────────────────────────────────────────
-#  ARP SWEEP — discover live hosts
-# ─────────────────────────────────────────────────
+sql_escape() {
+    printf "%s" "${1//\'/\'\'}"
+}
+
+# ------------------------------------------------------------
+# Discovery helpers
+# ------------------------------------------------------------
+auto_subnet() {
+    ip route 2>/dev/null | awk '/proto kernel/ {print $1; exit}'
+}
+
 arp_sweep() {
     local subnet="$1"
-    echo -e "${YELLOW}[*] Running ARP sweep on $subnet ...${RESET}"
-    sudo arp-scan --localnet 2>/dev/null | grep -E "^[0-9]" || \
-    sudo arp-scan "$subnet" 2>/dev/null | grep -E "^[0-9]"
+
+    echo -e "${YELLOW}[INFO] Running host discovery on $subnet ...${RESET}" >&2
+
+    if command -v arp-scan >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null; then
+            sudo -n arp-scan "$subnet" 2>/dev/null | awk '/^[0-9]/ {print $1 "\t" $2 "\t" substr($0, index($0,$3))}'
+            return
+        fi
+        echo -e "${YELLOW}[WARN] sudo password required for arp-scan; falling back to nmap if available.${RESET}" >&2
+    fi
+
+    if command -v nmap >/dev/null 2>&1; then
+        nmap -sn "$subnet" 2>/dev/null | awk '
+            function flush_host() {
+                if (ip != "" && up == 1) {
+                    print ip "\t" (mac ? mac : "Unknown") "\t" (vendor ? vendor : "Unknown");
+                }
+            }
+            /Nmap scan report for/ {
+                flush_host();
+                ip=$NF;
+                gsub(/[()]/, "", ip);
+                mac="";
+                vendor="Unknown";
+                up=0;
+            }
+            /Host is up/ {
+                up=1;
+            }
+            /MAC Address:/ {
+                mac=$3;
+                vendor=substr($0, index($0,$4));
+                gsub(/[()]/, "", vendor);
+            }
+            END {
+                flush_host();
+            }'
+    fi
 }
 
-# ─────────────────────────────────────────────────
-#  HOSTNAME RESOLUTION
-# ─────────────────────────────────────────────────
 resolve_hostname() {
     local ip="$1"
-    host "$ip" 2>/dev/null | grep "domain name pointer" | awk '{print $NF}' | tr -d '.' || echo "unknown"
+
+    if command -v host >/dev/null 2>&1; then
+        host "$ip" 2>/dev/null | awk '/domain name pointer/ {print $NF; found=1} END {if (!found) print "unknown"}' | tr -d '.'
+    else
+        echo "unknown"
+    fi
 }
 
-# ─────────────────────────────────────────────────
-#  OS FINGERPRINT (lightweight via nmap)
-# ─────────────────────────────────────────────────
-os_fingerprint() {
-    local ip="$1"
-    timeout 5 sudo nmap -O --osscan-guess -T4 -p 22,80,443 "$ip" 2>/dev/null | \
-        grep "OS guess\|OS details\|Running:" | head -1 | awk -F': ' '{print $2}' | tr -d '\n'
-}
-
-# ─────────────────────────────────────────────────
-#  SAVE TO DB
-# ─────────────────────────────────────────────────
 save_scan() {
+    [[ "${HCE_GUI_CAPTURE:-0}" == "1" ]] && return 0
+
     local subnet="$1" hosts="$2" unknown="$3" result="$4"
     local ts operator scan_id
     ts=$(date '+%Y-%m-%d %H:%M:%S')
     operator="${USER:-unknown}"
+
+    subnet=$(sql_escape "$subnet")
+    result=$(sql_escape "$result")
+    operator=$(sql_escape "$operator")
 
     scan_id=$(sqlite3 "$DB_FILE" "
         INSERT INTO network_scans (subnet, hosts_found, unknown_hosts, result, operator, timestamp)
@@ -116,22 +164,29 @@ save_scan() {
 }
 
 save_host() {
+    [[ "${HCE_GUI_CAPTURE:-0}" == "1" ]] && return 0
+
     local scan_id="$1" ip="$2" mac="$3" hostname="$4" vendor="$5" status="$6"
+    ip=$(sql_escape "$ip")
+    mac=$(sql_escape "$mac")
+    hostname=$(sql_escape "$hostname")
+    vendor=$(sql_escape "$vendor")
+    status=$(sql_escape "$status")
+
     sqlite3 "$DB_FILE" "
         INSERT INTO network_hosts (scan_id, ip_address, mac_address, hostname, vendor, status)
         VALUES ('$scan_id', '$ip', '$mac', '$hostname', '$vendor', '$status');
     "
 }
 
-# ─────────────────────────────────────────────────
-#  REPORT GENERATION
-# ─────────────────────────────────────────────────
 generate_report() {
+    [[ "${HCE_GUI_CAPTURE:-0}" == "1" ]] && return 0
+
     local subnet="$1"
     local report="$REPORT_DIR/network_scan_$(date +%Y%m%d_%H%M%S).txt"
     {
         echo "============================================================"
-        echo "  HYBRID_VAS — Network Scanner Report"
+        echo "  HYBRID_VAS - Network Scanner Report"
         echo "  Generated : $(date '+%Y-%m-%d %H:%M:%S')"
         echo "  Subnet    : $subnet"
         echo "============================================================"
@@ -140,23 +195,31 @@ generate_report() {
             "SELECT ip_address, mac_address, hostname, vendor, status FROM network_hosts
              WHERE scan_id = (SELECT MAX(id) FROM network_scans);"
     } > "$report"
-    echo -e "${GREEN}[✔] Report saved: $report${RESET}"
+    echo -e "${GREEN}[OK] Report saved: $report${RESET}"
 }
 
-# ─────────────────────────────────────────────────
-#  MAIN SCAN
-# ─────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Main scan
+# ------------------------------------------------------------
 run_scan() {
     local subnet="$1"
-    local total=0 unknown=0
+    local total=0
+    local unknown=0
+    local scan_id=""
     declare -a HOST_DATA
 
-    # Detect subnet automatically if not given
     if [[ -z "$subnet" ]]; then
-        subnet=$(ip route | grep "proto kernel" | head -1 | awk '{print $1}')
-        echo -e "${CYAN}[INFO] Auto-detected subnet: $subnet${RESET}"
+        subnet=$(auto_subnet)
+        echo -e "${CYAN}[INFO] Auto-detected subnet: ${subnet:-unknown}${RESET}"
     fi
 
+    if [[ -z "$subnet" ]]; then
+        echo -e "${RED}[ERROR] Could not determine subnet.${RESET}"
+        echo "VERDICT : SCAN FAILED - subnet unavailable"
+        return 1
+    fi
+
+    echo "Subnet: $subnet"
     echo -e "${CYAN}[INFO] Scanning subnet: $subnet${RESET}"
     echo "$(date '+%Y-%m-%d %H:%M:%S') SCAN $subnet" >> "$LOG_FILE"
 
@@ -165,46 +228,46 @@ run_scan() {
         total=$((total + 1))
 
         hostname=$(resolve_hostname "$ip")
-
-        os_info=$(os_fingerprint "$ip")
         status="KNOWN"
-        if [[ -z "$mac" || "$mac" == "(Unknown)" ]]; then
+
+        if [[ -z "$mac" || "$mac" == "Unknown" || "$mac" == "(Unknown)" ]]; then
             status="UNKNOWN"
             unknown=$((unknown + 1))
-            echo -e "${RED}  [!] UNKNOWN HOST : $ip  $mac  ${vendor:-?}${RESET}"
+            echo -e "${RED}Host: $ip  MAC: ${mac:-Unknown}  Hostname: ${hostname:-unknown}  Vendor: ${vendor:-Unknown}  Status: UNKNOWN${RESET}"
         else
-            echo -e "${GREEN}  [+] $ip  $mac  ${vendor:-?}  ${hostname:-unknown}${os_info:+  [${os_info}]}${RESET}"
+            echo -e "${GREEN}Host: $ip  MAC: $mac  Hostname: ${hostname:-unknown}  Vendor: ${vendor:-Unknown}  Status: KNOWN${RESET}"
         fi
 
-        HOST_DATA+=("$ip|$mac|$hostname|${vendor:-Unknown}|$status")
-    done < <(arp_sweep "$subnet" | awk '{print $1"\t"$2"\t"substr($0, index($0,$3))}')
+        HOST_DATA+=("$ip|${mac:-Unknown}|${hostname:-unknown}|${vendor:-Unknown}|$status")
+    done < <(arp_sweep "$subnet")
 
-    # Save to DB
-    scan_id=$(save_scan "$subnet" "$total" "$unknown" \
-        "$( [[ $unknown -gt 0 ]] && echo 'UNKNOWN_HOSTS_FOUND' || echo 'CLEAN' )")
+    result="$( [[ $unknown -gt 0 ]] && echo 'UNKNOWN_HOSTS_FOUND' || echo 'CLEAN' )"
+    scan_id=$(save_scan "$subnet" "$total" "$unknown" "$result")
 
-    for entry in "${HOST_DATA[@]}"; do
-        IFS='|' read -r ip mac hostname vendor status <<< "$entry"
-        save_host "$scan_id" "$ip" "$mac" "$hostname" "$vendor" "$status"
-    done
+    if [[ -n "$scan_id" ]]; then
+        for entry in "${HOST_DATA[@]}"; do
+            IFS='|' read -r ip mac hostname vendor status <<< "$entry"
+            save_host "$scan_id" "$ip" "$mac" "$hostname" "$vendor" "$status"
+        done
+    fi
 
-    # Verdict
-    echo -e "\n${CYAN}=============================================${RESET}"
-    echo -e "  Hosts found : $total"
-    echo -e "  Unknown     : $unknown"
+    echo ""
+    echo -e "${CYAN}=============================================${RESET}"
+    echo "Hosts found : $total"
+    echo "Unknown     : $unknown"
+    echo "$total hosts found"
+    echo "$unknown unknown hosts"
+
     if [[ $unknown -gt 0 ]]; then
-        echo -e "${RED}  VERDICT : UNKNOWN HOSTS DETECTED — investigate${RESET}"
+        echo -e "${RED}VERDICT : UNKNOWN HOSTS DETECTED - investigate${RESET}"
     else
-        echo -e "${GREEN}  VERDICT : ALL HOSTS RECOGNISED${RESET}"
+        echo -e "${GREEN}VERDICT : ALL HOSTS RECOGNISED${RESET}"
     fi
     echo -e "${CYAN}=============================================${RESET}"
 
     generate_report "$subnet"
 }
 
-# ─────────────────────────────────────────────────
-#  VIEW HISTORY
-# ─────────────────────────────────────────────────
 view_history() {
     echo -e "${CYAN}Last 5 network scans:${RESET}"
     sqlite3 -column -header "$DB_FILE" \
@@ -214,9 +277,6 @@ view_history() {
     read -p "Press ENTER to continue..."
 }
 
-# ─────────────────────────────────────────────────
-#  MAIN MENU
-# ─────────────────────────────────────────────────
 check_deps
 init_db
 banner

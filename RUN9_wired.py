@@ -288,6 +288,30 @@ def init_db():
         service   TEXT,
         version   TEXT)""")
 
+    # ── Network scanner ──────────────────────────────────────────
+    cur.execute("""CREATE TABLE IF NOT EXISTS network_scans(
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    INTEGER REFERENCES scan_sessions(id),
+        subnet        TEXT,
+        hosts_found   INTEGER DEFAULT 0,
+        unknown_hosts INTEGER DEFAULT 0,
+        result        TEXT,
+        operator      TEXT,
+        timestamp     TEXT DEFAULT CURRENT_TIMESTAMP)""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS network_hosts(
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_id     INTEGER REFERENCES network_scans(id),
+        ip_address  TEXT,
+        mac_address TEXT,
+        hostname    TEXT,
+        vendor      TEXT,
+        status      TEXT,
+        timestamp   TEXT DEFAULT CURRENT_TIMESTAMP)""")
+    _net_cols = {row[1] for row in cur.execute("PRAGMA table_info(network_scans)")}
+    if "session_id" not in _net_cols:
+        cur.execute("ALTER TABLE network_scans ADD COLUMN session_id INTEGER")
+
     # ── USB scanner ──────────────────────────────────────────────
     cur.execute("""CREATE TABLE IF NOT EXISTS usb_scans(
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -521,6 +545,55 @@ def _parse_scan_type(lines):
         if "full" in ll and "scan" in ll:  return "FULL"
     return "SYN"
 
+def _parse_network_info(lines, target):
+    """Extract subnet, counts, and host rows from network scanner output."""
+    subnet = target or None
+    hosts_found = 0
+    unknown_hosts = 0
+    hosts = []
+
+    subnet_pat = re.compile(r'\bsubnet\s*:\s*(\S+)', re.I)
+    hosts_pat = re.compile(r'\bhosts?\s+found\s*:\s*(\d+)|(\d+)\s+hosts?\s+found', re.I)
+    unknown_pat = re.compile(r'\bunknown\s*:\s*(\d+)|(\d+)\s+unknown\s+hosts?', re.I)
+    host_pat = re.compile(
+        r'Host:\s*(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+'
+        r'MAC:\s*(?P<mac>\S+)\s+'
+        r'Hostname:\s*(?P<hostname>.*?)\s+'
+        r'Vendor:\s*(?P<vendor>.*?)\s+'
+        r'Status:\s*(?P<status>KNOWN|UNKNOWN)',
+        re.I)
+
+    for line in lines:
+        s = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+        m = subnet_pat.search(s)
+        if m:
+            subnet = m.group(1).strip()
+
+        m = hosts_pat.search(s)
+        if m:
+            hosts_found = int(next(g for g in m.groups() if g))
+
+        m = unknown_pat.search(s)
+        if m:
+            unknown_hosts = int(next(g for g in m.groups() if g))
+
+        m = host_pat.search(s)
+        if m:
+            hosts.append((
+                m.group("ip"),
+                m.group("mac"),
+                m.group("hostname").strip()[:120] or "unknown",
+                m.group("vendor").strip()[:120] or "Unknown",
+                m.group("status").upper(),
+            ))
+
+    if hosts and hosts_found == 0:
+        hosts_found = len(hosts)
+    if hosts and unknown_hosts == 0:
+        unknown_hosts = sum(1 for *_, status in hosts if status == "UNKNOWN")
+
+    return subnet or "N/A", hosts_found, unknown_hosts, hosts
+
 def _parse_usb_info(lines):
     """Extract USB device name, device path, files_scanned, threats_found
     and per-file results from USB scanner output."""
@@ -747,6 +820,22 @@ def db_save_result(tid, target, out_text, threat, user,
                     (scan_id, port, protocol, state, service, version))
 
         # ── USB ───────────────────────────────────────────────────
+        elif tid == "net":
+            subnet, hosts_found, unknown_hosts, hosts = _parse_network_info(lines, target)
+            cur.execute(
+                "INSERT INTO network_scans"
+                "(session_id,subnet,hosts_found,unknown_hosts,result,operator,timestamp)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (session_id, subnet, hosts_found, unknown_hosts,
+                 verdict, op, ts))
+            scan_id = cur.lastrowid
+            for ip, mac, hostname, vendor, status in hosts:
+                cur.execute(
+                    "INSERT INTO network_hosts"
+                    "(scan_id,ip_address,mac_address,hostname,vendor,status,timestamp)"
+                    " VALUES(?,?,?,?,?,?,?)",
+                    (scan_id, ip, mac, hostname, vendor, status, ts))
+
         elif tid == "usb":
             usb_name, device_path, files_scanned, threats_found, file_results = \
                 _parse_usb_info(lines)
@@ -872,12 +961,14 @@ MANUAL_TOOLS = [
             "Saving network map to database",
         ],
         "out": [
-            ("info", "Subnet        :  192.168.1.0/24"),
-            ("info", "192.168.1.1   ALIVE   Gateway / Router"),
-            ("info", "192.168.1.10  ALIVE   Workstation (Windows)"),
-            ("info", "192.168.1.15  ALIVE   Network Printer"),
-            ("warn", "192.168.1.99  ALIVE   UNKNOWN DEVICE"),
-            ("warn", "VERDICT:  1 unrecognised host — investigate"),
+            ("info", "Subnet: 192.168.1.0/24"),
+            ("info", "Host: 192.168.1.1  MAC: AA:BB:CC:00:00:01  Hostname: gateway  Vendor: Router  Status: KNOWN"),
+            ("info", "Host: 192.168.1.10  MAC: AA:BB:CC:00:00:10  Hostname: workstation  Vendor: Windows  Status: KNOWN"),
+            ("info", "Host: 192.168.1.15  MAC: AA:BB:CC:00:00:15  Hostname: printer  Vendor: Printer  Status: KNOWN"),
+            ("warn", "Host: 192.168.1.99  MAC: Unknown  Hostname: unknown  Vendor: Unknown  Status: UNKNOWN"),
+            ("info", "4 hosts found"),
+            ("warn", "1 unknown hosts"),
+            ("warn", "VERDICT : UNKNOWN HOSTS DETECTED - investigate"),
         ],
     },
     {
@@ -2274,6 +2365,8 @@ class ResultsViewer(tk.Frame):
          "domain,ip_address,registrar,result,risk_score,operator,timestamp"),
         ("Port",          "port_scans",
          "target,scan_type,result,operator,timestamp"),
+        ("Network",       "network_scans",
+         "subnet,hosts_found,unknown_hosts,result,operator,timestamp"),
         ("USB",           "usb_scans",
          "usb_name,device_path,files_scanned,threats_found,result,operator,timestamp"),
     ]
@@ -2304,6 +2397,9 @@ class ResultsViewer(tk.Frame):
         "registrar":        "Registrar",
         "target":           "Target",
         "scan_type":        "Scan Type",
+        "subnet":           "Subnet",
+        "hosts_found":      "Hosts",
+        "unknown_hosts":    "Unknown",
         "usb_name":         "Device",
         "device_path":      "Mount Path",
         "files_scanned":    "Files",
@@ -2336,6 +2432,9 @@ class ResultsViewer(tk.Frame):
         "registrar":        160,
         "target":           170,
         "scan_type":        100,
+        "subnet":           160,
+        "hosts_found":       70,
+        "unknown_hosts":     80,
         "usb_name":         150,
         "device_path":      190,
         "files_scanned":     70,
@@ -2487,6 +2586,7 @@ class ResultsViewer(tk.Frame):
         "vuln":     "Vuln Scanner",
         "domain":   "Domain Checker",
         "port":     "Port Scanner",
+        "net":      "Network Scanner",
         "usb":      "USB Scanner",
         "url":      "URL Scanner",
         "cuckoo":   "Cuckoo Sandbox",
@@ -2711,7 +2811,8 @@ class ResultsViewer(tk.Frame):
                     pass
             # Clear supporting tables not listed in TABS
             for extra in ["vuln_scans", "backdoor_findings",
-                          "port_findings", "usb_file_results", "scan_sessions"]:
+                          "port_findings", "network_hosts",
+                          "usb_file_results", "scan_sessions"]:
                 try:
                     conn.execute(f"DELETE FROM {extra}")
                 except Exception:
