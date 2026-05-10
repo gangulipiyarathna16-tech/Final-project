@@ -332,6 +332,13 @@ def init_db():
         sha256         TEXT,
         result         TEXT,
         malware_family TEXT)""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_sessions_tool_id ON scan_sessions(tool_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_sessions_started_at ON scan_sessions(started_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_sessions_finished_at ON scan_sessions(finished_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_network_scans_session_id ON network_scans(session_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usb_scans_session_id ON usb_scans(session_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_network_hosts_scan_id ON network_hosts(scan_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_usb_file_results_scan_id ON usb_file_results(scan_id)")
     for u, p, r in [
         ("admin",    "admin123",   "admin"),
         ("analyst1", "analyst123", "analyst"),
@@ -2454,8 +2461,8 @@ class ResultsViewer(tk.Frame):
         self._active    = 0
         self._build()
         self._load()
-        # Auto-refresh every 10 seconds
-        self._refresh_loop()
+        # Auto-refresh every 10 seconds after the initial load.
+        self.after(10000, self._refresh_loop)
 
     def _build(self):
         # Header row
