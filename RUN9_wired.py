@@ -156,6 +156,8 @@ def can(user, action):
 # ═══════════════════════════════════════════════════════
 DB = str(DB_PATH)
 def _h(p): return hashlib.sha256(p.encode()).hexdigest()
+def _now_ts():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def init_db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
@@ -368,7 +370,7 @@ def db_audit(u, a):
         c = sqlite3.connect(DB)
         c.execute(
             "INSERT INTO audit(username,action,ts) VALUES(?,?,?)",
-            (u, a, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            (u, a, _now_ts()))
         c.commit(); c.close()
     except Exception as e:
         print(f"[AUDIT ERROR] user={u} action={a}: {e}")
@@ -659,7 +661,7 @@ def _parse_real_verdict(lines):
 def db_save_result(tid, target, out_text, threat, user,
                    started_at=None, verdict_override=None):
     """Save a scan result to the appropriate tables with full structured detail."""
-    finished_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    finished_at = _now_ts()
     ts          = finished_at
     op          = user.get("username", "") if user else ""
     lines       = list(out_text or [])
@@ -1483,7 +1485,7 @@ class ToolCard(tk.Frame):
         tid        = self.tool["id"]
         steps      = self.tool["steps"]
         total      = len(steps)
-        started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        started_at = _now_ts()
         interp, script_path = SCRIPT_MAP.get(tid, (None, None))
 
         # ── Animate progress through steps ────
@@ -2676,7 +2678,7 @@ class ResultsViewer(tk.Frame):
                          if "threat" in self._tree.item(r)["tags"])
             self._status.set(
                 f"  {total} records  |  {threats} threats detected  "
-                f"|  Last updated: {datetime.datetime.now().strftime('%H:%M:%S')}")
+                f"|  Last updated: {_now_ts().split()[1]}")
 
         except Exception as e:
             self._status.set(f"DB error: {e}")
